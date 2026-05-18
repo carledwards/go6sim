@@ -127,7 +127,7 @@ once, in the simulator core. Windows pull on each `Draw`.
 ## File layout (proposed)
 
 ```
-6502-sim-tui/
+go6sim/
 ├── cmd/6502-sim/main.go
 ├── bus/
 │   ├── bus.go

@@ -1,4 +1,4 @@
-# 6502-sim-tui
+# go6sim
 
 A floating-window 6502 microcomputer simulator with two interchangeable
 CPU cores, a memory-mapped VIC video chip, a real **6522 VIA** peripheral
@@ -17,11 +17,11 @@ to real silicon unmodified.
 
 ## Screenshots
 
-![6502-sim-tui](docs/images/screen-3.gif)
+![go6sim](docs/images/screen-3.gif)
 
-![6502-sim-tui](docs/images/screen-1.gif)
+![go6sim](docs/images/screen-1.gif)
 
-![6502-sim-tui](docs/images/screen-2.gif)
+![go6sim](docs/images/screen-2.gif)
 
 ## Quickstart
 

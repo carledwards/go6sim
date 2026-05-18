@@ -10,7 +10,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	foxpro "github.com/carledwards/foxpro-go"
-	"github.com/carledwards/6502-sim-tui/cpu"
+	"github.com/carledwards/go6sim/cpu"
 )
 
 // Speed is a target full-cycle clock rate. Hz of 0 means "as fast as

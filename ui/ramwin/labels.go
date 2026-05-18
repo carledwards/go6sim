@@ -9,7 +9,7 @@ import (
 
 	foxpro "github.com/carledwards/foxpro-go"
 
-	"github.com/carledwards/6502-sim-tui/asm"
+	"github.com/carledwards/go6sim/asm"
 )
 
 // drawLabels renders the Provider's symbols as a sortable table —

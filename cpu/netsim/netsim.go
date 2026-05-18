@@ -5,8 +5,8 @@ package netsim
 
 import (
 	netcpu "github.com/carledwards/6502-netsim-go/cpu"
-	"github.com/carledwards/6502-sim-tui/bus"
-	"github.com/carledwards/6502-sim-tui/cpu"
+	"github.com/carledwards/go6sim/bus"
+	"github.com/carledwards/go6sim/cpu"
 )
 
 // Adapter is a cpu.Backend backed by the netsim transistor simulator.

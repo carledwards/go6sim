@@ -32,7 +32,7 @@ package via
 import (
 	"time"
 
-	"github.com/carledwards/6502-sim-tui/asm"
+	"github.com/carledwards/go6sim/asm"
 )
 
 // RegBlockSize is the count of distinct registers on the chip — the

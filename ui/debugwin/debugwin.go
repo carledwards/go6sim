@@ -8,9 +8,9 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	foxpro "github.com/carledwards/foxpro-go"
-	"github.com/carledwards/6502-sim-tui/bus"
-	"github.com/carledwards/6502-sim-tui/cpu"
-	"github.com/carledwards/6502-sim-tui/disasm"
+	"github.com/carledwards/go6sim/bus"
+	"github.com/carledwards/go6sim/cpu"
+	"github.com/carledwards/go6sim/disasm"
 )
 
 const (

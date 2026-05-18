@@ -7,7 +7,7 @@ package demos
 import (
 	_ "embed"
 
-	"github.com/carledwards/6502-sim-tui/asm"
+	"github.com/carledwards/go6sim/asm"
 )
 
 // .s files live in asmsrc/ (a non-package dir) so the Go toolchain

@@ -3,10 +3,10 @@ package interp_test
 import (
 	"testing"
 
-	"github.com/carledwards/6502-sim-tui/bus"
-	"github.com/carledwards/6502-sim-tui/components/ram"
-	"github.com/carledwards/6502-sim-tui/components/rom"
-	"github.com/carledwards/6502-sim-tui/cpu/interp"
+	"github.com/carledwards/go6sim/bus"
+	"github.com/carledwards/go6sim/components/ram"
+	"github.com/carledwards/go6sim/components/rom"
+	"github.com/carledwards/go6sim/cpu/interp"
 )
 
 // Same end-to-end test as the netsim adapter — load a deterministic

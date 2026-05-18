@@ -10,8 +10,8 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	foxpro "github.com/carledwards/foxpro-go"
-	"github.com/carledwards/6502-sim-tui/bus"
-	"github.com/carledwards/6502-sim-tui/components/display"
+	"github.com/carledwards/go6sim/bus"
+	"github.com/carledwards/go6sim/components/display"
 )
 
 // MinW / MinH cover the chrome border + a tiny visible interior so a

@@ -4,7 +4,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	foxpro "github.com/carledwards/foxpro-go"
-	"github.com/carledwards/6502-sim-tui/components/display"
+	"github.com/carledwards/go6sim/components/display"
 )
 
 // pixelPlaceholderRune is the Unicode codepoint stamped into every

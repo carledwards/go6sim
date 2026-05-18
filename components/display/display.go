@@ -6,7 +6,7 @@ package display
 import (
 	"time"
 
-	"github.com/carledwards/6502-sim-tui/asm"
+	"github.com/carledwards/go6sim/asm"
 )
 
 // Display is a width × height byte grid mapped onto a contiguous

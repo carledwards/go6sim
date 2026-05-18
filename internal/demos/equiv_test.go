@@ -10,7 +10,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/carledwards/6502-sim-tui/asm"
+	"github.com/carledwards/go6sim/asm"
 )
 
 func TestDemoByteEquivalence(t *testing.T) {

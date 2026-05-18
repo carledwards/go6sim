@@ -1,6 +1,6 @@
 package demos
 
-import "github.com/carledwards/6502-sim-tui/asm"
+import "github.com/carledwards/go6sim/asm"
 
 // buildMarquee — "HELLO 6502 SIM" scrolling marquee.
 //

@@ -11,7 +11,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/carledwards/6502-sim-tui/asm"
+	"github.com/carledwards/go6sim/asm"
 )
 
 // Bus is a 16-bit-address memory map.

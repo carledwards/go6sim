@@ -16,7 +16,7 @@ import (
 
 	foxpro "github.com/carledwards/foxpro-go"
 
-	"github.com/carledwards/6502-sim-tui/components/via"
+	"github.com/carledwards/go6sim/components/via"
 )
 
 const (

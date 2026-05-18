@@ -3,10 +3,10 @@ package netsim_test
 import (
 	"testing"
 
-	"github.com/carledwards/6502-sim-tui/bus"
-	"github.com/carledwards/6502-sim-tui/components/ram"
-	"github.com/carledwards/6502-sim-tui/components/rom"
-	"github.com/carledwards/6502-sim-tui/cpu/netsim"
+	"github.com/carledwards/go6sim/bus"
+	"github.com/carledwards/go6sim/components/ram"
+	"github.com/carledwards/go6sim/components/rom"
+	"github.com/carledwards/go6sim/cpu/netsim"
 )
 
 // End-to-end: build a real bus with RAM + ROM, load a small program

@@ -9,7 +9,7 @@
 // demo lineup.
 package demos
 
-import "github.com/carledwards/6502-sim-tui/asm"
+import "github.com/carledwards/go6sim/asm"
 
 // Memory map a demo author should know:
 //

@@ -3,7 +3,7 @@ package demos
 import (
 	"fmt"
 
-	"github.com/carledwards/6502-sim-tui/asm"
+	"github.com/carledwards/go6sim/asm"
 )
 
 // buildQuad — divides the framebuffer into 4 rectangular regions and

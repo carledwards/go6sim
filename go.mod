@@ -1,4 +1,4 @@
-module github.com/carledwards/6502-sim-tui
+module github.com/carledwards/go6sim
 
 go 1.26.2
 

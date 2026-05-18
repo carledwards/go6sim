@@ -25,22 +25,22 @@ import (
 	"github.com/carledwards/foxpro-go/wasm"
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/carledwards/6502-sim-tui/asm"
-	"github.com/carledwards/6502-sim-tui/bus"
-	"github.com/carledwards/6502-sim-tui/components/display"
-	"github.com/carledwards/6502-sim-tui/components/ram"
-	"github.com/carledwards/6502-sim-tui/components/rom"
-	"github.com/carledwards/6502-sim-tui/components/via"
-	"github.com/carledwards/6502-sim-tui/cpu"
-	"github.com/carledwards/6502-sim-tui/cpu/interp"
-	"github.com/carledwards/6502-sim-tui/cpu/netsim"
-	"github.com/carledwards/6502-sim-tui/internal/demos"
-	"github.com/carledwards/6502-sim-tui/ui/clockwin"
-	"github.com/carledwards/6502-sim-tui/ui/cpuwin"
-	"github.com/carledwards/6502-sim-tui/ui/displaywin"
-	"github.com/carledwards/6502-sim-tui/ui/ramwin"
-	"github.com/carledwards/6502-sim-tui/ui/scopewin"
-	"github.com/carledwards/6502-sim-tui/ui/viawin"
+	"github.com/carledwards/go6sim/asm"
+	"github.com/carledwards/go6sim/bus"
+	"github.com/carledwards/go6sim/components/display"
+	"github.com/carledwards/go6sim/components/ram"
+	"github.com/carledwards/go6sim/components/rom"
+	"github.com/carledwards/go6sim/components/via"
+	"github.com/carledwards/go6sim/cpu"
+	"github.com/carledwards/go6sim/cpu/interp"
+	"github.com/carledwards/go6sim/cpu/netsim"
+	"github.com/carledwards/go6sim/internal/demos"
+	"github.com/carledwards/go6sim/ui/clockwin"
+	"github.com/carledwards/go6sim/ui/cpuwin"
+	"github.com/carledwards/go6sim/ui/displaywin"
+	"github.com/carledwards/go6sim/ui/ramwin"
+	"github.com/carledwards/go6sim/ui/scopewin"
+	"github.com/carledwards/go6sim/ui/viawin"
 )
 
 // Memory map. The whole VIC lives in a single contiguous 16 KB region
@@ -804,7 +804,7 @@ func openAbout(a *foxpro.App) {
 		"Built on foxpro-go (TUI framework) and",
 		"6502-netsim-go (Visual6502 transistor port).",
 		"",
-		"Source: github.com/carledwards/6502-sim-tui",
+		"Source: github.com/carledwards/go6sim",
 	})
 	w := foxpro.NewWindow("About", foxpro.Rect{X: 30, Y: 4, W: 56, H: 20}, body)
 	a.Manager.Add(w)

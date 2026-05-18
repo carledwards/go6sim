@@ -16,8 +16,8 @@
 package interp
 
 import (
-	"github.com/carledwards/6502-sim-tui/bus"
-	"github.com/carledwards/6502-sim-tui/cpu"
+	"github.com/carledwards/go6sim/bus"
+	"github.com/carledwards/go6sim/cpu"
 )
 
 const (

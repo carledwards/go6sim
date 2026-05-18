@@ -4,12 +4,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/carledwards/6502-sim-tui/bus"
-	"github.com/carledwards/6502-sim-tui/components/display"
-	"github.com/carledwards/6502-sim-tui/components/ram"
-	"github.com/carledwards/6502-sim-tui/components/rom"
-	"github.com/carledwards/6502-sim-tui/components/via"
-	"github.com/carledwards/6502-sim-tui/cpu/interp"
+	"github.com/carledwards/go6sim/bus"
+	"github.com/carledwards/go6sim/components/display"
+	"github.com/carledwards/go6sim/components/ram"
+	"github.com/carledwards/go6sim/components/rom"
+	"github.com/carledwards/go6sim/components/via"
+	"github.com/carledwards/go6sim/cpu/interp"
 )
 
 // rig builds the minimum machine wiring needed by the pacing tests:

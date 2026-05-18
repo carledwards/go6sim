@@ -1,4 +1,4 @@
-# 6502-sim-tui Roadmap
+# go6sim Roadmap
 
 A floating-window 6502 simulator built on top of `foxpro-go`. The
 simulator hosts pluggable components (RAM, ROM, display, etc.) on a
@@ -16,7 +16,7 @@ Keep entries short; one line per task. Cross-cutting design lives in
 
 ## Phase 0 — Repo skeleton ✓
 
-- [x] `go mod init github.com/carledwards/6502-sim-tui`
+- [x] `go mod init github.com/carledwards/go6sim`
 - [x] Pull `foxpro-go` and `6502-netsim-go` as deps (local replace)
 - [x] `cmd/6502-sim/main.go` — minimal app boots, shows a "Hello 6502" window
 - [x] `Makefile` — `build`, `run`, `tidy`, `test`, `clean`

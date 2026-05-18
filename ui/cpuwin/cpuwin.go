@@ -9,7 +9,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	foxpro "github.com/carledwards/foxpro-go"
-	"github.com/carledwards/6502-sim-tui/cpu"
+	"github.com/carledwards/go6sim/cpu"
 )
 
 // rateWindow controls the smoothing window for the displayed Hz —

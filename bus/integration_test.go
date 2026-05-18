@@ -3,9 +3,9 @@ package bus_test
 import (
 	"testing"
 
-	"github.com/carledwards/6502-sim-tui/bus"
-	"github.com/carledwards/6502-sim-tui/components/ram"
-	"github.com/carledwards/6502-sim-tui/components/rom"
+	"github.com/carledwards/go6sim/bus"
+	"github.com/carledwards/go6sim/components/ram"
+	"github.com/carledwards/go6sim/components/rom"
 )
 
 // Wires real RAM + ROM through the bus to make sure the Component
