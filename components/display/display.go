@@ -148,8 +148,11 @@ type Controller struct {
 	color     *Display
 	chars     *Display
 	lastCmd   uint8
-	lastCmdAt time.Time
-	frameAt   time.Time // when RegFrame was last written
+	virt      time.Duration // accumulated virtual time (Ticker) — never wall-clock
+	lastCmdAt time.Duration // c.virt at the last RegCmd write
+	frameAt   time.Duration // c.virt at the last RegFrame write
+	cmdSeen   bool
+	frameSeen bool
 	paused    bool
 	snapColor []uint8
 	snapChar  []uint8
@@ -194,8 +197,11 @@ func (c *Controller) Size() int    { return 9 }
 // the display init pattern, then calls Reset on us).
 func (c *Controller) Reset() {
 	c.lastCmd = 0
-	c.lastCmdAt = time.Time{}
-	c.frameAt = time.Time{}
+	c.virt = 0
+	c.lastCmdAt = 0
+	c.frameAt = 0
+	c.cmdSeen = false
+	c.frameSeen = false
 	c.paused = false
 	c.snapColor = nil
 	c.snapChar = nil
@@ -259,7 +265,8 @@ func (c *Controller) Write(offset uint16, v uint8) {
 	switch offset {
 	case RegCmd:
 		c.lastCmd = v
-		c.lastCmdAt = time.Now()
+		c.lastCmdAt = c.virt
+		c.cmdSeen = true
 		c.execute(v)
 	case RegPause:
 		wasPaused := c.paused
@@ -268,7 +275,8 @@ func (c *Controller) Write(offset uint16, v uint8) {
 			c.captureSnapshot()
 		}
 	case RegFrame:
-		c.frameAt = time.Now()
+		c.frameAt = c.virt
+		c.frameSeen = true
 		if c.paused {
 			c.captureSnapshot()
 		}
@@ -447,14 +455,25 @@ func (c *Controller) IsPaused() bool { return c.paused }
 // LastCmd returns the most recently written command byte at +0.
 func (c *Controller) LastCmd() uint8 { return c.lastCmd }
 
-// LastCmdAt returns the wall-clock time of the most recent command
-// write at RegCmd. Used by the UI to flash button indicators when
-// the CPU is firing commands (not just on direct UI clicks).
-func (c *Controller) LastCmdAt() time.Time { return c.lastCmdAt }
+// Tick accumulates virtual time. Implementing bus.Ticker makes the
+// backplane advance the controller's clock deterministically — dt comes
+// from the clock driver, never time.Now — so the recency accessors
+// below are replayable, not wall-clock.
+func (c *Controller) Tick(dt time.Duration) { c.virt += dt }
 
-// LastFrameAt returns the wall-clock time of the most recent write
-// to RegFrame.
-func (c *Controller) LastFrameAt() time.Time { return c.frameAt }
+// SinceLastCmd reports virtual time elapsed since the most recent RegCmd
+// write, and whether any command has been written. The UI flashes
+// command indicators from this; both sides share the virtual timebase,
+// so it stays correct under any clock driver.
+func (c *Controller) SinceLastCmd() (time.Duration, bool) {
+	return c.virt - c.lastCmdAt, c.cmdSeen
+}
+
+// SinceLastFrame reports virtual time elapsed since the most recent
+// RegFrame write, and whether any frame has been committed.
+func (c *Controller) SinceLastFrame() (time.Duration, bool) {
+	return c.virt - c.frameAt, c.frameSeen
+}
 
 // ReadColor returns the color byte at the linear offset, honoring
 // pause state. Used by the display window's renderer.

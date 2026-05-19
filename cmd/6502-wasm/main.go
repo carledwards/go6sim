@@ -26,6 +26,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/carledwards/go6sim/asm"
+	"github.com/carledwards/go6sim/backplane"
 	"github.com/carledwards/go6sim/bus"
 	"github.com/carledwards/go6sim/components/display"
 	"github.com/carledwards/go6sim/components/ram"
@@ -104,8 +105,9 @@ const tickPeriod = 50 * time.Millisecond
 func main() {
 	// Bus + memory map. Outer TraceBus stamps reads/writes for the
 	// memory viewer's "recently touched" tinting.
-	innerBus := bus.New()
-	b := bus.NewTraceBus(innerBus)
+	bp := backplane.New()
+	innerBus := bp.Trace().Inner() // raw bus: untraced provider reads + Components()
+	b := bp                        // the backplane (IS bus.Bus + Tick + Attach)
 	mainRAM := ram.New("ram", ramBase, ramSize)
 	colorPlane := display.New("display.color", colorBase, dispW, dispH)
 	charPlane := display.New("display.char", charBase, dispW, dispH)
@@ -150,13 +152,13 @@ func main() {
 	currentDemo := bootDemo.Name
 	must(mainROM.Load(0, bootDemo.Bytes))
 	must(mainROM.SetResetVector(0xE000))
-	must(b.Register(mainRAM))
-	must(b.Register(colorPlane))
-	must(b.Register(charPlane))
-	must(b.Register(dispCtrl))
-	must(b.Register(gfxPlane))
-	must(b.Register(via1))
-	must(b.Register(mainROM))
+	must(b.Attach(mainRAM))
+	must(b.Attach(colorPlane))
+	must(b.Attach(charPlane))
+	must(b.Attach(dispCtrl))
+	must(b.Attach(gfxPlane))
+	must(b.Attach(via1))
+	must(b.Attach(mainROM))
 
 	buildBackend := func(name string) (cpu.Backend, error) {
 		switch name {
@@ -243,7 +245,7 @@ func main() {
 
 	ramProv := &ramwin.Provider{
 		Bus:          innerBus,
-		Trace:        b,
+		Trace:        bp.Trace(),
 		Backend:      backend,
 		Base:         0x0000,
 		Length:       0x100,
@@ -260,7 +262,7 @@ func main() {
 
 	romProv := &ramwin.Provider{
 		Bus:          innerBus,
-		Trace:        b,
+		Trace:        bp.Trace(),
 		Backend:      backend,
 		Base:         romBase,
 		Length:       romSize,

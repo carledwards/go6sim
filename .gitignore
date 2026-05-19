@@ -9,3 +9,8 @@
 /web/foxpro.js
 
 .claude/
+
+# Local multi-module Go workspace (per-developer; lives at the parent
+# dir, but ignore here too so a stray in-repo one is never committed).
+go.work
+go.work.sum
