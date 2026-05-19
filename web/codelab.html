@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>go6sim · CodeLab (local spike)</title>
+<style>
+  :root{color-scheme:dark}
+  body{font:14px/1.5 ui-monospace,Menlo,monospace;background:#0d1117;color:#c9d1d9;margin:0;padding:1.5rem}
+  h1{font-size:1rem;font-weight:600;margin:0 0 1rem;color:#7ee787}
+  .wrap{display:grid;grid-template-columns:1fr 360px;gap:1.25rem;max-width:1100px}
+  textarea{width:100%;height:340px;background:#010409;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:.75rem;font:13px/1.45 ui-monospace,monospace;resize:vertical;box-sizing:border-box}
+  button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:.45rem .8rem;font:13px ui-monospace,monospace;cursor:pointer;margin-right:.4rem}
+  button:hover{border-color:#7ee787}
+  .leds{display:flex;gap:.5rem;margin:1rem 0}
+  .led{width:34px;height:34px;border-radius:50%;background:#161b22;border:1px solid #30363d}
+  .led.on{background:#7ee787;border-color:#7ee787;box-shadow:0 0 10px #7ee787}
+  pre{background:#010409;border:1px solid #30363d;border-radius:6px;padding:.75rem;margin:.5rem 0;white-space:pre-wrap;font-size:12px;max-height:210px;overflow:auto}
+  .lbl{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.1em;margin:.6rem 0 .25rem}
+  #status{color:#8b949e}
+</style>
+</head>
+<body>
+<h1>go6sim · CodeLab (local spike) — 8-LED controller</h1>
+<div class="wrap">
+  <div>
+    <div class="lbl">6502 source — stores to VIA Port B ($B000 = 8 LEDs)</div>
+    <textarea id="src" spellcheck="false"></textarea>
+    <div style="margin-top:.6rem">
+      <button id="run">▶ Assemble &amp; Run</button>
+      <button id="stop">■ Stop</button>
+      <button id="step">⤳ Step</button>
+      <button id="reset">↺ Reset</button>
+      <span id="status">loading wasm…</span>
+    </div>
+    <div class="lbl">assembler / errors</div>
+    <pre id="err">—</pre>
+  </div>
+  <div>
+    <div class="lbl">VIA Port B — 8 LEDs (bit 7 … bit 0)</div>
+    <div class="leds" id="leds"></div>
+    <div class="lbl">CPU</div>
+    <pre id="regs">—</pre>
+    <div class="lbl">disassembly</div>
+    <pre id="dis">—</pre>
+  </div>
+</div>
+<script src="wasm_exec.js"></script>
+<script>
+const SEED = `; 8 LEDs on VIA Port B — a binary counter.
+        LDX #$00
+loop:   STX ViaBase        ; ViaBase = $B000 = VIA port B (the 8 LEDs)
+        INX
+        LDY #$00
+delay:  INY
+        BNE delay
+        JMP loop
+`;
+const $ = id => document.getElementById(id);
+$('src').value = SEED;
+
+const leds = [];
+for (let i = 0; i < 8; i++) { const d = document.createElement('div'); d.className = 'led'; $('leds').appendChild(d); leds.push(d); }
+
+async function startGo(file) {
+  const go = new Go();
+  let res;
+  try { res = await WebAssembly.instantiateStreaming(fetch(file), go.importObject); }
+  catch { res = await WebAssembly.instantiate(await (await fetch(file)).arrayBuffer(), go.importObject); }
+  go.run(res.instance); // blocks on select{}; sets its global first
+}
+
+let asm, sim, running = false, raf = 0;
+const hex = n => '$' + n.toString(16).toUpperCase().padStart(2, '0');
+
+function renderLEDs() {
+  const v = sim.peek(0xB000);
+  for (let i = 0; i < 8; i++) leds[i].classList.toggle('on', !!(v & (1 << (7 - i))));
+}
+function renderRegs() {
+  const s = sim.state();
+  $('regs').textContent =
+    `A=${hex(s.a)} X=${hex(s.x)} Y=${hex(s.y)} SP=${hex(s.sp)} P=${hex(s.p)}\n` +
+    `PC=$${s.pc.toString(16).toUpperCase().padStart(4, '0')}  cyc=${s.halfCycles}  ${s.running ? 'RUN' : 'STOP'}`;
+}
+function frame() { if (!running) return; sim.advance(16); renderLEDs(); renderRegs(); raf = requestAnimationFrame(frame); }
+
+function assembleAndRun() {
+  cancelAnimationFrame(raf); running = false;
+  const r = asm.assemble({ source: $('src').value, target: 'sim-tui', simple: true });
+  if (!r.success) { $('err').textContent = 'assemble errors:\n' + JSON.stringify(r.errors, null, 1); return; }
+  $('err').textContent = 'assembled OK — ' + r.bytes.length + ' bytes @ $' + r.origin.toString(16).toUpperCase();
+  $('dis').textContent = r.disasm || '—';
+  const lo = sim.load(r.bytes);
+  if (lo && lo.error) { $('err').textContent = 'load: ' + lo.error; return; }
+  sim.setSpeedHz(1000); renderLEDs(); renderRegs();
+  running = true; sim.setRunning(true); raf = requestAnimationFrame(frame);
+}
+$('run').onclick = assembleAndRun;
+$('stop').onclick = () => { running = false; sim.setRunning(false); cancelAnimationFrame(raf); renderRegs(); };
+$('step').onclick = () => { running = false; sim.setRunning(false); cancelAnimationFrame(raf); sim.step(1); renderLEDs(); renderRegs(); };
+$('reset').onclick = () => { running = false; sim.setRunning(false); cancelAnimationFrame(raf); sim.reset(); renderLEDs(); renderRegs(); };
+
+(async () => {
+  await startGo('go6asm.wasm');
+  await startGo('core.wasm');
+  for (let i = 0; i < 200 && !(globalThis.go6asm && globalThis.go6sim); i++) await new Promise(r => setTimeout(r, 5));
+  asm = globalThis.go6asm; sim = globalThis.go6sim;
+  $('status').textContent = (asm && sim) ? 'ready — press ▶ Assemble & Run' : 'wasm failed to load';
+})();
+</script>
+</body>
+</html>
