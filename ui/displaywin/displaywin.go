@@ -462,13 +462,16 @@ func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.The
 		}
 		switch def.reg {
 		case display.RegCmd:
-			if p.Controller != nil && p.Controller.LastCmd() == def.val &&
-				now.Sub(p.Controller.LastCmdAt()) < flashDuration {
-				lit = true
+			if p.Controller != nil && p.Controller.LastCmd() == def.val {
+				if d, ok := p.Controller.SinceLastCmd(); ok && d < flashDuration {
+					lit = true
+				}
 			}
 		case display.RegFrame:
-			if p.Controller != nil && now.Sub(p.Controller.LastFrameAt()) < flashDuration {
-				lit = true
+			if p.Controller != nil {
+				if d, ok := p.Controller.SinceLastFrame(); ok && d < flashDuration {
+					lit = true
+				}
 			}
 		}
 		ind := '○'

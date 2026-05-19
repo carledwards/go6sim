@@ -3,7 +3,7 @@ module github.com/carledwards/go6sim
 go 1.26.2
 
 require (
-	github.com/carledwards/6502-netsim-go v0.1.1
+	github.com/carledwards/6502-netsim-go v0.1.2
 	github.com/carledwards/foxpro-go v0.3.0
 	github.com/carledwards/go6asm v0.1.0
 	github.com/gdamore/tcell/v2 v2.7.4

@@ -13,7 +13,9 @@ import (
 	"github.com/carledwards/foxpro-go/dialog"
 
 	"github.com/carledwards/go6sim/asm"
+	"github.com/carledwards/go6sim/backplane"
 	"github.com/carledwards/go6sim/bus"
+	"github.com/carledwards/go6sim/clock"
 	"github.com/carledwards/go6sim/components/display"
 	"github.com/carledwards/go6sim/components/ram"
 	"github.com/carledwards/go6sim/components/rom"
@@ -21,6 +23,7 @@ import (
 	"github.com/carledwards/go6sim/cpu"
 	"github.com/carledwards/go6sim/cpu/interp"
 	"github.com/carledwards/go6sim/cpu/netsim"
+	"github.com/carledwards/go6sim/instrument"
 	"github.com/carledwards/go6sim/internal/demos"
 	"github.com/carledwards/go6sim/ui/clockwin"
 	"github.com/carledwards/go6sim/ui/cpuwin"
@@ -61,7 +64,6 @@ const (
 //   $8500+       VIC char plane   (520 bytes)
 //   $8800-$8802  VIC controller   (cmd / pause / frame)
 //   $E000-$FFFF  ROM (program loaded here, reset vector at $FFFC)
-
 
 // tuneCandidates are the batch sizes auto-tune tries in order. They
 // are already round numbers, so the picked value is also "memorable"
@@ -137,8 +139,9 @@ func main() {
 	// have been touched recently. The inner bus is what the memory
 	// viewer's display reads use, so its own polling doesn't pollute
 	// the trace.
-	innerBus := bus.New()
-	b := bus.NewTraceBus(innerBus)
+	bp := backplane.New()
+	innerBus := bp.Trace().Inner() // raw bus: untraced provider reads + Components()
+	b := bp                        // the backplane (IS bus.Bus + Tick + Attach)
 	mainRAM := ram.New("ram", ramBase, ramSize)
 	colorPlane := display.New("display.color", colorBase, dispW, dispH)
 	charPlane := display.New("display.char", charBase, dispW, dispH)
@@ -172,12 +175,12 @@ func main() {
 	currentDemo := bootDemo.Name
 	must(mainROM.Load(0, bootDemo.Bytes))
 	must(mainROM.SetResetVector(0xE000))
-	must(b.Register(mainRAM))
-	must(b.Register(colorPlane))
-	must(b.Register(charPlane))
-	must(b.Register(dispCtrl))
-	must(b.Register(via1))
-	must(b.Register(mainROM))
+	must(b.Attach(mainRAM))
+	must(b.Attach(colorPlane))
+	must(b.Attach(charPlane))
+	must(b.Attach(dispCtrl))
+	must(b.Attach(via1))
+	must(b.Attach(mainROM))
 
 	// CPU backend — mutable so the CPU menu can swap it at runtime.
 	buildBackend := func(name string) (cpu.Backend, error) {
@@ -252,7 +255,7 @@ func main() {
 
 	ramProv := &ramwin.Provider{
 		Bus:          innerBus, // read display state without tracing it
-		Trace:        b,
+		Trace:        bp.Trace(),
 		Backend:      backend,
 		Base:         0x0000,
 		Length:       0x100,
@@ -269,7 +272,7 @@ func main() {
 
 	romProv := &ramwin.Provider{
 		Bus:          innerBus,
-		Trace:        b,
+		Trace:        bp.Trace(),
 		Backend:      backend,
 		Base:         romBase,
 		Length:       romSize,
@@ -285,7 +288,11 @@ func main() {
 		ramwin.MinW, ramwin.MinH)
 	romProv.Window = romWin
 
-	clockProv := clockwin.NewProvider(backend)
+	// One shared clock driver: the clock window renders it, the
+	// instrument (run loop) drives it. TUI is now an instrument client.
+	drv := clock.NewDriver(backend)
+	clockProv := clockwin.NewProviderWithDriver(drv)
+	inst := instrument.New(bp, drv)
 	if *batchFlag > 0 {
 		clockProv.MaxBatch = *batchFlag
 	} else {
@@ -342,7 +349,6 @@ func main() {
 		clockProv.Reset()
 	}
 	cpuProv.OnReset = machineReset
-
 
 	dispProv := &displaywin.Provider{
 		// inner bus so the window's own hex-dump reads don't pollute
@@ -433,8 +439,9 @@ func main() {
 	app.Tick(tickPeriod, func() {
 		scopeProv.Decimate = scopeDecimate()
 		for i := 0; i < subTicks; i++ {
-			clockProv.Advance(subPeriod)
-			b.Tick(subPeriod)
+			// inst.Advance == drv.Advance + bp.Tick, in lockstep —
+			// the exact pairing this loop used to hand-duplicate.
+			inst.Advance(subPeriod)
 		}
 	})
 

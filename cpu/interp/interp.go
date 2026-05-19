@@ -52,6 +52,12 @@ type Adapter struct {
 	// (analogous to T1 / opcode fetch), false on the burn ticks
 	// that pad out the instruction's published cycle count.
 	sync bool
+
+	// brkCount increments whenever a BRK vectors through $FFFE — a
+	// read-only observable for the instrument's vector-taken
+	// breakpoint and Taps. interp models BRK only; hardware IRQ
+	// delivery is a separate feature (docs/architecture-backplane.md).
+	brkCount uint64
 }
 
 // New creates an Adapter wired to the given bus. Call Reset before
@@ -65,6 +71,7 @@ func (a *Adapter) Reset() {
 	a.pc = a.read16(0xFFFC)
 	a.halfCyclesLeft = 7*2 - 1 // reset takes 7 cycles
 	a.halfCyclesTotal = 0
+	a.brkCount = 0
 	a.sync = false
 }
 
@@ -73,11 +80,19 @@ func (a *Adapter) HalfStep() {
 		a.halfCyclesLeft--
 		a.sync = false
 	} else {
-		a.execute()
+		// At an instruction boundary a real 6502 services a pending
+		// IRQ instead of fetching the next opcode (brick 9b). Gated on
+		// the I-flag and a card actually pulling the line, so programs
+		// that never enable interrupts stay byte-identical.
+		if a.irqPending() {
+			a.serviceIRQ()
+		} else {
+			a.execute()
+		}
 		// Mirror a real 6502's SYNC line going high during opcode
-		// fetch (T1). Interp executes the whole instruction in one
-		// call, so SYNC is true on the half-step that ran execute()
-		// and false on the burn ticks that follow.
+		// fetch (T1) / interrupt entry. Interp does the whole
+		// instruction in one call, so SYNC is true on this boundary
+		// half-step and false on the burn ticks that follow.
 		a.sync = true
 	}
 	a.halfCyclesTotal++
@@ -85,6 +100,30 @@ func (a *Adapter) HalfStep() {
 
 func (a *Adapter) Registers() cpu.Registers {
 	return cpu.Registers{A: a.a, X: a.x, Y: a.y, S: a.sp, P: a.p, PC: a.pc}
+}
+
+// irqPending reports whether the backplane is asserting the shared IRQ
+// line and interrupts are enabled (I clear). Type-asserted so a plain
+// bus with no IRQ aggregation simply never interrupts — non-backplane
+// wirings and interrupt-free programs are wholly unaffected.
+func (a *Adapter) irqPending() bool {
+	if a.p&flagI != 0 {
+		return false
+	}
+	src, ok := a.bus.(interface{ IRQ() bool })
+	return ok && src.IRQ()
+}
+
+// serviceIRQ runs the 6502 hardware-IRQ sequence: push PC and P (B
+// clear, U set), set I, vector through $FFFE. 7 cycles — like BRK but
+// B=0 on the pushed status, and PC is not pre-incremented.
+func (a *Adapter) serviceIRQ() {
+	a.push(uint8(a.pc >> 8))
+	a.push(uint8(a.pc))
+	a.push((a.p | flagU) &^ flagB)
+	a.setFlag(flagI, true)
+	a.pc = a.read16(0xFFFE)
+	a.halfCyclesLeft = 2*7 - 1
 }
 
 func (a *Adapter) HalfCycles() uint64 { return a.halfCyclesTotal }
@@ -97,6 +136,15 @@ func (a *Adapter) ReadCycle() bool    { return a.lastWasRead }
 func (a *Adapter) IRQ() bool  { return true }
 func (a *Adapter) NMI() bool  { return true }
 func (a *Adapter) SYNC() bool { return a.sync }
+
+// Taps exposes read-only observables (bus.Tappable). interp publishes
+// the cumulative BRK-vector count; the instrument diffs it to detect a
+// vector-taken event for break-on-vector debugging.
+func (a *Adapter) Taps() []bus.Tap {
+	return []bus.Tap{
+		{Name: "brk", Read: func() uint64 { return a.brkCount }},
+	}
+}
 
 var _ cpu.Backend = (*Adapter)(nil)
 
@@ -328,6 +376,7 @@ func (a *Adapter) execute() {
 		a.push(a.p | flagB | flagU)
 		a.setFlag(flagI, true)
 		a.pc = a.read16(0xFFFE)
+		a.brkCount++
 		cycles = 7
 
 	// Flag set/clear

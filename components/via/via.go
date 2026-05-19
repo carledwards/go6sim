@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/carledwards/go6sim/asm"
+	"github.com/carledwards/go6sim/bus"
 )
 
 // RegBlockSize is the count of distinct registers on the chip — the
@@ -159,6 +160,31 @@ func (v *VIA) CrystalHz() uint64 { return v.crystalHz }
 func (v *VIA) Name() string { return v.name }
 func (v *VIA) Base() uint16 { return v.base }
 func (v *VIA) Size() int    { return Size }
+
+// Taps exposes read-only observables (bus.Tappable): the IRQ-asserted
+// state (any enabled IFR flag set — what a wired IRQ line *would*
+// drive) and the live T1 counter. Per-source attribution is emergent:
+// each VIA is its own card, so the instrument keys these under the
+// card's name.
+func (v *VIA) Taps() []bus.Tap {
+	return []bus.Tap{
+		{Name: "irq", Read: func() uint64 {
+			if v.ifr&v.ier&0x7F != 0 {
+				return 1
+			}
+			return 0
+		}},
+		{Name: "t1", Read: func() uint64 { return uint64(v.t1Counter) }},
+	}
+}
+
+// IRQAsserted implements bus.IRQSource: the chip pulls the shared IRQ
+// line low whenever an enabled IFR flag is set — exactly the condition
+// IFR bit 7 reports on read. The backplane wired-ORs this into the line
+// the CPU honors (brick 9b).
+func (v *VIA) IRQAsserted() bool {
+	return v.ifr&v.ier&0x7F != 0
+}
 
 // Read returns the register's current value and applies any read
 // side effects (notably: reading T1C-L clears the T1 IFR flag).
