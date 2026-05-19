@@ -290,31 +290,49 @@ its feel are never regressed.
   break-on-vector via the BRK tap), and `Taps()` aggregation
   (`<card>.<tap>` + `cpu.<tap>`). Additive, tcell-free, wasm-clean.
   Net: `instrument/breakpoint_test.go` (4 tests). ✓
-- **Brick 9b — DEFERRED, separate feature (not carve refactor).**
-  Hardware-IRQ delivery: wire VIA `IFR`→CPU IRQ pin; `interp` honor IRQ
-  (vector `$FFFE` when I clear at an instruction boundary); netsim pin
-  parity. Changes CPU execution semantics, needs interp/netsim parity +
-  its own deterministic golden. Required by lesson-8b (VIA-timer IRQ →
-  learner ISR). Tracked; tackle deliberately, on its own.
+- **Brick 9b — hardware-IRQ delivery — DONE (interp + netsim).**
+  `bus.IRQSource` capability + `Backplane.IRQ()` wired-OR;
+  `VIA.IRQAsserted()` (`ifr&ier&0x7F`); `interp` services IRQ at the
+  instruction boundary (6502 sequence, B-clear, vector `$FFFE`),
+  **gated on I-flag + a card asserting** so interrupt-free programs stay
+  byte-identical (verified: goldentrace/machine/demos unchanged). Net
+  `instrument/irq_test.go` — three gated variants (delivery + IER gate +
+  I-flag gate, VIA T1 → backplane → CPU → ISR). Enables lesson-8b.
+  - **netsim parity: DONE.** Added `CPU.SetIRQ(asserted bool)` upstream
+    in `6502-netsim-go/cpu/cpu.go` (drives the active-low IRQ netlist
+    node via the same `setLow/setHigh`+recalc path `Reset` uses; unit
+    test `cpu/setirq_test.go`). `go6sim/cpu/netsim` now captures the
+    bus's `IRQ()` and pushes it onto the pin every `HalfStep`. Parity
+    net: `TestHardwareIRQDeliveryNetsim` (transistor core takes the same
+    VIA-T1 IRQ; ~0.1 s).
+  - **Cross-repo release: DONE.** `6502-netsim-go` tagged **`v0.1.2`**
+    (commit `f718650`, `SetIRQ`); go6sim `go.mod` pins
+    `…6502-netsim-go v0.1.2` (real `go.sum`, no replace/pseudo).
+    Verified green with `GOWORK=off` — builds/tests off the module
+    cache, not the workspace. Carve is self-contained & CI-buildable.
 
 ---
 
-## ✅ Backplane carve COMPLETE (bricks 1–8 refactor + 9a)
+## ✅ Backplane carve COMPLETE (bricks 1–8 + 9a + 9b incl. netsim)
 
 The architecture in this doc is realized: a tcell-free, wasm-clean,
 **deterministic** core; one `Backplane` composition surface; the clock
 as a driver; one `instrument.Instrument` API (control + observation +
-breakpoints) that the web/MCP/learn edges consume; the TUI is an
-instrument client; `machine` presets (`VICDemo`/`TeachMin`). Every brick
+breakpoints + hardware-IRQ) that the web/MCP/learn edges consume; the
+TUI is an instrument client; `machine` presets (`VICDemo`/`TeachMin`);
+hardware IRQ delivered on **both** CPU backends. Every brick
 behaviour-identical, verified by automated nets (goldentrace, clock,
-backplane, instrument, breakpoint, machine demo-golden, display
-virtual-time) **plus** the pre-existing equiv/analyze backstops — green
-throughout. Interactive TUI UX manually confirmed by the user.
+backplane, instrument, breakpoint, irq, irq-netsim, machine demo-golden,
+display virtual-time) **plus** the pre-existing equiv/analyze backstops
+— green throughout, incl. upstream `6502-netsim-go`. Interactive TUI UX
+manually confirmed by the user.
 
-Deferred (not carve): **9b hardware-IRQ delivery**; the optional
-cmd-uses-`machine`-preset migration (cmd already works via brick 7).
-Master-plan next: step 3+ — `cmd/6502-core-wasm` bridge, `mcp-go6sim`,
-the web `<CodeLab>`, site delivery infra, then authoring the path.
+Cross-repo release **done** (`6502-netsim-go v0.1.2` tagged; go6sim
+pins it; `GOWORK=off`-verified). Open (NOT carve refactor): the
+optional cmd-uses-`machine`-preset migration (cmd already works via
+brick 7). Master-plan next: step 3+ —
+`cmd/6502-core-wasm` bridge, `mcp-go6sim`, the web `<CodeLab>`, site
+delivery infra, then authoring the learn path.
 - **Brick 8** — presets (`vic-demo` byte-identical = the proof;
   `teach-min`).
 - **Brick 9** — taps (VIA irq, CPU irq-ack) + `interrupt-taken`

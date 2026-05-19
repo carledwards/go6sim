@@ -48,3 +48,12 @@ type Tap struct {
 type Tappable interface {
 	Taps() []Tap
 }
+
+// IRQSource is a Component that can pull the shared, active-low IRQ
+// line. IRQAsserted reports true when this card currently requests an
+// interrupt. The backplane wired-ORs every IRQSource into one line the
+// CPU honors (brick 9b) — modeled on a real open-collector IRQ bus:
+// any card may assert it; the CPU sees the OR.
+type IRQSource interface {
+	IRQAsserted() bool
+}

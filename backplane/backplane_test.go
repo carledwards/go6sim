@@ -15,22 +15,57 @@ type resettableCard struct {
 	resets int
 }
 
-func (c *resettableCard) Name() string                 { return "rw" }
-func (c *resettableCard) Base() uint16                  { return c.base }
-func (c *resettableCard) Size() int                     { return len(c.mem) }
-func (c *resettableCard) Read(off uint16) uint8         { return c.mem[off] }
-func (c *resettableCard) Write(off uint16, v uint8)     { c.mem[off] = v }
-func (c *resettableCard) Reset()                        { c.resets++ }
+func (c *resettableCard) Name() string              { return "rw" }
+func (c *resettableCard) Base() uint16              { return c.base }
+func (c *resettableCard) Size() int                 { return len(c.mem) }
+func (c *resettableCard) Read(off uint16) uint8     { return c.mem[off] }
+func (c *resettableCard) Write(off uint16, v uint8) { c.mem[off] = v }
+func (c *resettableCard) Reset()                    { c.resets++ }
 
 // passiveCard implements only bus.Component (no Reset) — must be skipped
 // by Backplane.Reset, never panic.
 type passiveCard struct{ base uint16 }
 
-func (c *passiveCard) Name() string             { return "passive" }
-func (c *passiveCard) Base() uint16             { return c.base }
+func (c *passiveCard) Name() string              { return "passive" }
+func (c *passiveCard) Base() uint16              { return c.base }
 func (c *passiveCard) Size() int                 { return 16 }
 func (c *passiveCard) Read(off uint16) uint8     { return 0 }
 func (c *passiveCard) Write(off uint16, v uint8) {}
+
+// irqCard implements bus.Component AND bus.IRQSource.
+type irqCard struct {
+	base     uint16
+	asserted bool
+}
+
+func (c *irqCard) Name() string              { return "irq" }
+func (c *irqCard) Base() uint16              { return c.base }
+func (c *irqCard) Size() int                 { return 16 }
+func (c *irqCard) Read(off uint16) uint8     { return 0 }
+func (c *irqCard) Write(off uint16, v uint8) {}
+func (c *irqCard) IRQAsserted() bool         { return c.asserted }
+
+func TestBackplaneIRQWiredOr(t *testing.T) {
+	bp := backplane.New()
+	pv := &passiveCard{base: 0x0000}
+	ic := &irqCard{base: 0x0100}
+	if err := bp.Attach(pv); err != nil {
+		t.Fatal(err)
+	}
+	if bp.IRQ() {
+		t.Fatal("IRQ asserted with only a non-IRQSource card attached")
+	}
+	if err := bp.Attach(ic); err != nil {
+		t.Fatal(err)
+	}
+	if bp.IRQ() {
+		t.Fatal("IRQ asserted while the IRQ card is idle")
+	}
+	ic.asserted = true
+	if !bp.IRQ() {
+		t.Fatal("IRQ not asserted after a card pulled the line")
+	}
+}
 
 func TestBackplaneIsBusAndComposes(t *testing.T) {
 	bp := backplane.New()

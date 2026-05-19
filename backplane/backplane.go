@@ -53,3 +53,16 @@ func (b *Backplane) Reset() {
 // instrument layer should prefer the Backplane surface; this is the
 // escape hatch for the existing windows during the carve.
 func (b *Backplane) Trace() *bus.TraceBus { return b.TraceBus }
+
+// IRQ is the wired-OR of every attached bus.IRQSource card's
+// IRQAsserted state — the shared interrupt line the CPU honors (brick
+// 9b). True means at least one card is requesting an interrupt.
+// Cards without the capability never pull the line.
+func (b *Backplane) IRQ() bool {
+	for _, c := range b.Components() {
+		if s, ok := c.(bus.IRQSource); ok && s.IRQAsserted() {
+			return true
+		}
+	}
+	return false
+}

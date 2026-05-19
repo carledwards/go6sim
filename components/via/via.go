@@ -178,6 +178,14 @@ func (v *VIA) Taps() []bus.Tap {
 	}
 }
 
+// IRQAsserted implements bus.IRQSource: the chip pulls the shared IRQ
+// line low whenever an enabled IFR flag is set — exactly the condition
+// IFR bit 7 reports on read. The backplane wired-ORs this into the line
+// the CPU honors (brick 9b).
+func (v *VIA) IRQAsserted() bool {
+	return v.ifr&v.ier&0x7F != 0
+}
+
 // Read returns the register's current value and applies any read
 // side effects (notably: reading T1C-L clears the T1 IFR flag).
 //
