@@ -1,0 +1,131 @@
+// Package instrument is the single control/observe surface over a
+// go6sim machine — the one API every edge (the TUI, the web <CodeLab>,
+// mcp-go6sim, a future debugger CLI) talks to. It composes a
+// *backplane.Backplane (the cards + bus) and a *clock.Driver (run/step/
+// speed) so callers never hand-wire the CPU loop.
+//
+// Litmus (docs/architecture-backplane.md): a debugger CLI — step / dump
+// / peek / poke / go — must be expressible on this surface. It is:
+// Step/StepCycle = s/t, Mem = dump, Peek/Poke = peek/poke, SetRunning =
+// g/.
+//
+// Brick 6 of the backplane carve: additive, no existing code changed.
+// Program loading is deferred to the preset brick (presets own the ROM
+// card); this brick is pure control + observation.
+package instrument
+
+import (
+	"time"
+
+	"github.com/carledwards/go6sim/backplane"
+	"github.com/carledwards/go6sim/clock"
+)
+
+// State is a snapshot of architectural + clock state for observers.
+type State struct {
+	A, X, Y, S, P uint8
+	PC            uint16
+	HalfCycles    uint64
+	Running       bool
+	SpeedHz       int
+}
+
+// Instrument wraps a machine for control and observation.
+type Instrument struct {
+	bp  *backplane.Backplane
+	drv *clock.Driver
+}
+
+// New builds an instrument over an already-composed backplane and a
+// clock driver (the driver carries the cpu.Backend).
+func New(bp *backplane.Backplane, drv *clock.Driver) *Instrument {
+	return &Instrument{bp: bp, drv: drv}
+}
+
+// Reset returns the machine to power-on state: every Resettable card,
+// then the CPU + clock counters. (clock.Driver.Reset deliberately keeps
+// the running flag — hardware reset-button semantics.)
+func (i *Instrument) Reset() {
+	i.bp.Reset()
+	i.drv.Reset()
+}
+
+// Step advances n whole instructions. No-op while running — the clock
+// owns execution then. (Debugger `s`; lesson single-stepping.)
+func (i *Instrument) Step(n int) {
+	for k := 0; k < n; k++ {
+		i.drv.StepInstruction()
+	}
+}
+
+// StepCycle advances n half-cycles. (Debugger `t`; cycle-level lessons.)
+func (i *Instrument) StepCycle(n int) {
+	for k := 0; k < n; k++ {
+		i.drv.StepOne()
+	}
+}
+
+// SetRunning starts/stops free-run. Run-loop drivers then call Advance.
+func (i *Instrument) SetRunning(on bool) { i.drv.SetRunning(on) }
+
+// Running reports whether the clock is free-running.
+func (i *Instrument) Running() bool { return i.drv.Running() }
+
+// Driver exposes the clock driver for speed/batch configuration and the
+// clock UI (the TUI's clock window, web speed control). The Instrument
+// is the primary surface; this is the deliberate escape hatch for clock
+// tuning, mirroring backplane's Trace() hatch.
+func (i *Instrument) Driver() *clock.Driver { return i.drv }
+
+// Advance is the budget-tick clock driver (resolved open-question #1):
+// it steps the CPU for the window AND ticks the bus/peripherals by the
+// SAME window in lockstep — the pairing that cmd/6502-{sim,wasm}
+// currently hand-duplicate (clockProv.Advance + b.Tick). Every run loop
+// (TUI, web RAF, MCP) calls only this. Returns half-steps run.
+func (i *Instrument) Advance(dt time.Duration) int {
+	n := i.drv.Advance(dt)
+	i.bp.Tick(dt)
+	return n
+}
+
+// State snapshots registers + clock for observers.
+func (i *Instrument) State() State {
+	be := i.drv.Backend
+	r := be.Registers()
+	return State{
+		A: r.A, X: r.X, Y: r.Y, S: r.S, P: r.P, PC: r.PC,
+		HalfCycles: be.HalfCycles(),
+		Running:    i.drv.Running(),
+		SpeedHz:    i.drv.Speed().Hz,
+	}
+}
+
+// Peek reads a byte WITHOUT stamping the bus read-trace — inspection
+// must not look like the CPU touched memory (matches the codebase's
+// existing untraced-innerBus convention for the memory windows).
+func (i *Instrument) Peek(addr uint16) uint8 {
+	return i.bp.Trace().Inner().Read(addr)
+}
+
+// Mem returns bytes in [lo, hi] inclusive via untraced reads. A
+// "framebuffer"/display read is just Mem over the configured region —
+// resolved open-question #2: the sim ships bytes, there is no display
+// card in teach-min. Returns nil if hi < lo.
+func (i *Instrument) Mem(lo, hi uint16) []byte {
+	if hi < lo {
+		return nil
+	}
+	inner := i.bp.Trace().Inner()
+	out := make([]byte, int(hi)-int(lo)+1)
+	for a := int(lo); a <= int(hi); a++ {
+		out[a-int(lo)] = inner.Read(uint16(a))
+	}
+	return out
+}
+
+// Poke writes a byte through the traced bus: a debugger poke is a real
+// mutation, and surfacing it in the UI write-trace is informative
+// (unlike inspection reads, which must stay invisible).
+func (i *Instrument) Poke(addr uint16, v uint8) {
+	i.bp.Write(addr, v)
+}

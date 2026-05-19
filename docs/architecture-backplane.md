@@ -249,12 +249,22 @@ its feel are never regressed.
 
   *Original "brick 5" was a 3-in-1 sketch — re-decomposed into tight
   green bricks:*
-- **Next — Brick 6** — the instrument API (Backplane + cpu.Backend +
-  clock.Driver behind one surface: Load/Reset/Step/Run/State/Mem/
-  peek-poke/Frame + clock-driver select). Additive; the web/MCP/learn
-  edges' surface.
-- **Brick 7** — the TUI fully becomes an instrument client (behaviour
-  identical).
+- **Brick 6** — `instrument` package: `Instrument` composes
+  `*backplane.Backplane` + `*clock.Driver` behind one surface —
+  `Reset/Step/StepCycle/SetRunning/Running/Advance/State/Peek/Poke/Mem`
+  + `Driver()` hatch. `Advance(dt)` encapsulates the
+  `drv.Advance`+`bp.Tick` lockstep cmd hand-duplicates. `Peek/Mem` use
+  the *untraced* inner bus (inspection mustn't pollute the UI trace);
+  `Poke` is traced (a real mutation). `Frame` = `Mem` over a region
+  (Q2: ship bytes, no display card). Load deferred to presets (they own
+  the ROM card). Additive, tcell-free, wasm-clean. Litmus net
+  `instrument/instrument_test.go`: the golden program driven entirely
+  through the surface (step/dump/peek/poke/go). ✓
+- **Next — Brick 7** — the TUI fully becomes an instrument client
+  (behaviour identical). *Invasive*: rewrites the intricate
+  `cmd/6502-{sim,wasm}` run loop; no automated test covers the
+  interactive TUI UX, so correctness rests on careful reasoning + build
+  + manual run.
 - **Brick 8** — presets (`vic-demo` byte-identical = the proof;
   `teach-min`).
 - **Brick 9** — taps (VIA irq, CPU irq-ack) + `interrupt-taken`
