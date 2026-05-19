@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/carledwards/go6sim/backplane"
+	"github.com/carledwards/go6sim/bus"
 	"github.com/carledwards/go6sim/clock"
 )
 
@@ -32,14 +33,96 @@ type State struct {
 
 // Instrument wraps a machine for control and observation.
 type Instrument struct {
-	bp  *backplane.Backplane
-	drv *clock.Driver
+	bp       *backplane.Backplane
+	drv      *clock.Driver
+	bps      map[uint16]bool
+	brkOnVec bool
 }
 
 // New builds an instrument over an already-composed backplane and a
 // clock driver (the driver carries the cpu.Backend).
 func New(bp *backplane.Backplane, drv *clock.Driver) *Instrument {
-	return &Instrument{bp: bp, drv: drv}
+	return &Instrument{bp: bp, drv: drv, bps: map[uint16]bool{}}
+}
+
+// RunResult reports why RunUntil stopped.
+//
+//	Reason: "breakpoint" | "vector" | "budget"
+//	Addr:   PC at the stop
+type RunResult struct {
+	HalfCycles uint64
+	Reason     string
+	Addr       uint16
+}
+
+// SetBreakpoint arms an instruction-address breakpoint.
+func (i *Instrument) SetBreakpoint(addr uint16) { i.bps[addr] = true }
+
+// ClearBreakpoint removes one address breakpoint.
+func (i *Instrument) ClearBreakpoint(addr uint16) { delete(i.bps, addr) }
+
+// ClearBreakpoints removes all address breakpoints.
+func (i *Instrument) ClearBreakpoints() { i.bps = map[uint16]bool{} }
+
+// BreakOnVector toggles "stop when an interrupt vector is taken". 9a
+// observes BRK (the only vectoring interp models); hardware-IRQ
+// delivery is a separate, deferred feature.
+func (i *Instrument) BreakOnVector(on bool) { i.brkOnVec = on }
+
+// RunUntil is the deterministic debugger run: it advances the CPU one
+// half-cycle at a time (so it is interruptible, unlike the batched
+// free-run Advance), up to maxHalf half-cycles, stopping early on a
+// vector-taken event or an armed address breakpoint (checked at the
+// SYNC instruction boundary). This is what a debugger CLI's `go`
+// drives; pair with Step for step-into-ISR.
+func (i *Instrument) RunUntil(maxHalf int) RunResult {
+	be := i.drv.Backend
+
+	var brkRead func() uint64
+	if tp, ok := be.(bus.Tappable); ok {
+		for _, t := range tp.Taps() {
+			if t.Name == "brk" {
+				brkRead = t.Read
+			}
+		}
+	}
+	prevBrk := uint64(0)
+	if brkRead != nil {
+		prevBrk = brkRead()
+	}
+
+	for n := 0; n < maxHalf; n++ {
+		be.HalfStep()
+		if i.brkOnVec && brkRead != nil && brkRead() != prevBrk {
+			return RunResult{uint64(n + 1), "vector", be.Registers().PC}
+		}
+		if be.SYNC() {
+			if pc := be.Registers().PC; i.bps[pc] {
+				return RunResult{uint64(n + 1), "breakpoint", pc}
+			}
+		}
+	}
+	return RunResult{uint64(maxHalf), "budget", be.Registers().PC}
+}
+
+// Taps aggregates every card's read-only observables (bus.Tappable),
+// keyed "<card>.<tap>", plus the CPU under "cpu.<tap>". The web/MCP/
+// debugger surfaces render this uniformly without knowing devices.
+func (i *Instrument) Taps() map[string]uint64 {
+	out := map[string]uint64{}
+	for _, c := range i.bp.Components() {
+		if tp, ok := c.(bus.Tappable); ok {
+			for _, t := range tp.Taps() {
+				out[c.Name()+"."+t.Name] = t.Read()
+			}
+		}
+	}
+	if tp, ok := i.drv.Backend.(bus.Tappable); ok {
+		for _, t := range tp.Taps() {
+			out["cpu."+t.Name] = t.Read()
+		}
+	}
+	return out
 }
 
 // Reset returns the machine to power-on state: every Resettable card,

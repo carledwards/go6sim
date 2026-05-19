@@ -52,6 +52,12 @@ type Adapter struct {
 	// (analogous to T1 / opcode fetch), false on the burn ticks
 	// that pad out the instruction's published cycle count.
 	sync bool
+
+	// brkCount increments whenever a BRK vectors through $FFFE — a
+	// read-only observable for the instrument's vector-taken
+	// breakpoint and Taps. interp models BRK only; hardware IRQ
+	// delivery is a separate feature (docs/architecture-backplane.md).
+	brkCount uint64
 }
 
 // New creates an Adapter wired to the given bus. Call Reset before
@@ -65,6 +71,7 @@ func (a *Adapter) Reset() {
 	a.pc = a.read16(0xFFFC)
 	a.halfCyclesLeft = 7*2 - 1 // reset takes 7 cycles
 	a.halfCyclesTotal = 0
+	a.brkCount = 0
 	a.sync = false
 }
 
@@ -97,6 +104,15 @@ func (a *Adapter) ReadCycle() bool    { return a.lastWasRead }
 func (a *Adapter) IRQ() bool  { return true }
 func (a *Adapter) NMI() bool  { return true }
 func (a *Adapter) SYNC() bool { return a.sync }
+
+// Taps exposes read-only observables (bus.Tappable). interp publishes
+// the cumulative BRK-vector count; the instrument diffs it to detect a
+// vector-taken event for break-on-vector debugging.
+func (a *Adapter) Taps() []bus.Tap {
+	return []bus.Tap{
+		{Name: "brk", Read: func() uint64 { return a.brkCount }},
+	}
+}
 
 var _ cpu.Backend = (*Adapter)(nil)
 
@@ -328,6 +344,7 @@ func (a *Adapter) execute() {
 		a.push(a.p | flagB | flagU)
 		a.setFlag(flagI, true)
 		a.pc = a.read16(0xFFFE)
+		a.brkCount++
 		cycles = 7
 
 	// Flag set/clear

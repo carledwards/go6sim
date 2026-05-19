@@ -270,10 +270,51 @@ its feel are never regressed.
   instrument observes it). build + wasm-check + all nets/backstops
   green. No automated test covers interactive TUI UX → needs a manual
   smoke (`go run ./cmd/6502-sim`), but the reasoning is airtight. ✓
-- **Next — Brick 8** — presets (`vic-demo` == today, byte-identical =
-  the proof; `teach-min`). Brick 8 also owns `Load` (the ROM card).
-- **Brick 9** — taps (VIA irq, CPU irq-ack) + `interrupt-taken`
-  breakpoint.
+- **Brick 8** — `machine` package: `Machine` = bp+driver+instrument+ROM;
+  `VICDemo()` composes the standalone machine exactly as cmd/6502-sim
+  (RAM/color/char/ctrl/VIA/ROM, interp); `TeachMin()` = RAM + framebuffer
+  RAM region ($A000-$AFFF, no display Controller — resolved Q2) + VIA +
+  ROM; `Load()` owns ROM+reset-vector. Pure composition (no
+  internal/demos import). Nets: structural-layout proof (presets compose
+  the documented maps; VICDemo = byte-identical wiring to today) + the
+  **first demo-driven deterministic execution golden** (VICDemo runs the
+  real HelloDemo and renders "HELLO FROM go6asm" at row 6 — captured &
+  asserted) + TeachMin "framebuffer is RAM" contract. tcell-free,
+  wasm-clean, all backstops green. ✓
+- **Brick 9a** — observability closer. `via.Taps()` (`irq` =
+  IFR&IER-any-enabled, `t1` counter — read-only over existing state);
+  `interp` BRK-vector count + `Taps()` (`brk`); instrument breakpoint
+  engine — `SetBreakpoint/ClearBreakpoint(s)/BreakOnVector`,
+  `RunUntil(maxHalf) RunResult{HalfCycles,Reason,Addr}` (deterministic
+  per-half-step debugger run; SYNC-boundary address breakpoints;
+  break-on-vector via the BRK tap), and `Taps()` aggregation
+  (`<card>.<tap>` + `cpu.<tap>`). Additive, tcell-free, wasm-clean.
+  Net: `instrument/breakpoint_test.go` (4 tests). ✓
+- **Brick 9b — DEFERRED, separate feature (not carve refactor).**
+  Hardware-IRQ delivery: wire VIA `IFR`→CPU IRQ pin; `interp` honor IRQ
+  (vector `$FFFE` when I clear at an instruction boundary); netsim pin
+  parity. Changes CPU execution semantics, needs interp/netsim parity +
+  its own deterministic golden. Required by lesson-8b (VIA-timer IRQ →
+  learner ISR). Tracked; tackle deliberately, on its own.
+
+---
+
+## ✅ Backplane carve COMPLETE (bricks 1–8 refactor + 9a)
+
+The architecture in this doc is realized: a tcell-free, wasm-clean,
+**deterministic** core; one `Backplane` composition surface; the clock
+as a driver; one `instrument.Instrument` API (control + observation +
+breakpoints) that the web/MCP/learn edges consume; the TUI is an
+instrument client; `machine` presets (`VICDemo`/`TeachMin`). Every brick
+behaviour-identical, verified by automated nets (goldentrace, clock,
+backplane, instrument, breakpoint, machine demo-golden, display
+virtual-time) **plus** the pre-existing equiv/analyze backstops — green
+throughout. Interactive TUI UX manually confirmed by the user.
+
+Deferred (not carve): **9b hardware-IRQ delivery**; the optional
+cmd-uses-`machine`-preset migration (cmd already works via brick 7).
+Master-plan next: step 3+ — `cmd/6502-core-wasm` bridge, `mcp-go6sim`,
+the web `<CodeLab>`, site delivery infra, then authoring the path.
 - **Brick 8** — presets (`vic-demo` byte-identical = the proof;
   `teach-min`).
 - **Brick 9** — taps (VIA irq, CPU irq-ack) + `interrupt-taken`
