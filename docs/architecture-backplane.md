@@ -260,11 +260,20 @@ its feel are never regressed.
   the ROM card). Additive, tcell-free, wasm-clean. Litmus net
   `instrument/instrument_test.go`: the golden program driven entirely
   through the surface (step/dump/peek/poke/go). ✓
-- **Next — Brick 7** — the TUI fully becomes an instrument client
-  (behaviour identical). *Invasive*: rewrites the intricate
-  `cmd/6502-{sim,wasm}` run loop; no automated test covers the
-  interactive TUI UX, so correctness rests on careful reasoning + build
-  + manual run.
+- **Brick 7** — TUI is an instrument client. Done *minimally*, not by
+  rewrite: `clockwin.NewProviderWithDriver` lets the clock window and a
+  new `instrument.Instrument` **share one `*clock.Driver`**; the run
+  loop's hand-duplicated `clockProv.Advance + b.Tick` became
+  `inst.Advance(subPeriod)` (brick 6's `Advance` *is* that pairing).
+  Behaviour-identical **by construction** (same ops/order/shared
+  objects); backend-swap path unchanged (mutates the shared driver,
+  instrument observes it). build + wasm-check + all nets/backstops
+  green. No automated test covers interactive TUI UX → needs a manual
+  smoke (`go run ./cmd/6502-sim`), but the reasoning is airtight. ✓
+- **Next — Brick 8** — presets (`vic-demo` == today, byte-identical =
+  the proof; `teach-min`). Brick 8 also owns `Load` (the ROM card).
+- **Brick 9** — taps (VIA irq, CPU irq-ack) + `interrupt-taken`
+  breakpoint.
 - **Brick 8** — presets (`vic-demo` byte-identical = the proof;
   `teach-min`).
 - **Brick 9** — taps (VIA irq, CPU irq-ack) + `interrupt-taken`

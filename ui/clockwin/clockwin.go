@@ -41,9 +41,18 @@ type Provider struct {
 	foxpro.ScrollState
 }
 
-// NewProvider returns a Provider with the default speed (10 Hz).
+// NewProvider returns a Provider that owns a fresh clock driver at the
+// default speed (10 Hz).
 func NewProvider(backend cpu.Backend) *Provider {
-	return &Provider{Driver: clock.NewDriver(backend)}
+	return NewProviderWithDriver(clock.NewDriver(backend))
+}
+
+// NewProviderWithDriver returns a Provider that *shares* an existing
+// clock driver, so the same driver can simultaneously back an
+// instrument.Instrument (which the run loop calls) while this Provider
+// renders the clock window. Both observe one run/step/speed state.
+func NewProviderWithDriver(d *clock.Driver) *Provider {
+	return &Provider{Driver: d}
 }
 
 func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.Theme, focused bool) {
