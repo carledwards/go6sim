@@ -60,6 +60,42 @@ func TestPresetLayouts(t *testing.T) {
 	if got := layout(machine.TeachMin().BP); !eq(got, wantTeach) {
 		t.Fatalf("TeachMin layout:\n got %v\nwant %v", got, wantTeach)
 	}
+
+	wantMerlin := []string{
+		"ram@0000", "via1@B000", "via2@B100", "rom@E000",
+	}
+	if got := layout(machine.TeachMerlin().BP); !eq(got, wantMerlin) {
+		t.Fatalf("TeachMerlin layout:\n got %v\nwant %v", got, wantMerlin)
+	}
+}
+
+// TeachMerlin contract: two independent VIAs share the bus. A write to
+// one VIA's Port B must not leak into the other's, and vice versa —
+// they're distinct chips at distinct base addresses, even though both
+// are 6522s. This is the structural composability proof the bridge spec
+// leans on (two of the same card type, isolated, taps namespaced).
+func TestTeachMerlinTwoVIAsAreIndependent(t *testing.T) {
+	m := machine.TeachMerlin()
+
+	m.Inst.Poke(0xB000, 0xAA) // via1 ORB
+	m.Inst.Poke(0xB100, 0x55) // via2 ORB
+
+	if got := m.Inst.Peek(0xB000); got != 0xAA {
+		t.Errorf("via1 ORB: got $%02X, want $AA", got)
+	}
+	if got := m.Inst.Peek(0xB100); got != 0x55 {
+		t.Errorf("via2 ORB: got $%02X, want $55", got)
+	}
+
+	// Flip them; check the other did not change as a side effect.
+	m.Inst.Poke(0xB000, 0x11)
+	if got := m.Inst.Peek(0xB100); got != 0x55 {
+		t.Errorf("via2 leaked from via1 write: got $%02X, want $55", got)
+	}
+	m.Inst.Poke(0xB100, 0x22)
+	if got := m.Inst.Peek(0xB000); got != 0x11 {
+		t.Errorf("via1 leaked from via2 write: got $%02X, want $11", got)
+	}
 }
 
 // Deterministic demo-execution golden: compose VICDemo via the preset,
