@@ -241,7 +241,7 @@ func main() {
 
 	cpuProv := &cpuwin.Provider{Backend: backend}
 	cpuWindow := addWindow(cpuTitle,
-		foxpro.Rect{X: 2, Y: 1, W: 38, H: 13},
+		foxpro.Rect{X: 2, Y: 1, W: 38, H: 11},
 		cpuProv,
 		cpuwin.MinW, cpuwin.MinH)
 
@@ -291,8 +291,9 @@ func main() {
 		clockwin.MinW, clockwin.MinH)
 
 	viaProv := &viawin.Provider{VIA: via1, Base: viaBase}
-	addWindow("I/O",
-		foxpro.Rect{X: 2, Y: 21, W: 56, H: 20},
+	viaTitle := fmt.Sprintf("VIA 1 — $%04X @ %s", viaBase, viawin.FormatHz(via1.CrystalHz()))
+	addWindow(viaTitle,
+		foxpro.Rect{X: 2, Y: 13, W: 56, H: 18},
 		viaProv,
 		viawin.MinW, viawin.MinH)
 
@@ -343,7 +344,6 @@ func main() {
 		paintInitialDisplay()
 		clockProv.Reset()
 	}
-	cpuProv.OnReset = machineReset
 
 	dispProv := &displaywin.Provider{
 		Bus:        innerBus,

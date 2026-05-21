@@ -21,18 +21,9 @@ type Provider struct {
 	Backend cpu.Backend
 	foxpro.ScrollState
 
-	// OnReset is called when the user clicks the < Reset > button or
-	// presses the bound key. Wired by main to a machine-reset that
-	// also clears RAM and repaints the display.
-	OnReset func()
-
 	sampleHalf uint64
 	sampleTime time.Time
 	rate       float64 // smoothed half-cycles per second
-
-	// Reset button drag state.
-	pressed bool
-	armed   bool
 }
 
 // Rate returns the most-recently-measured full-cycle rate in Hz.
@@ -50,12 +41,10 @@ const (
 	MinH = 6
 )
 
-// Layout: rows 0,1 regs; 3,4 flags; 6,7,8 cycle/rate; 10 reset button.
-const (
-	resetButtonY     = 10
-	resetButtonLabel = "< Reset >"
-	resetButtonW     = 9
-)
+// Layout: rows 0,1 regs; 3,4 flags; 6,7,8 cycle/rate. The earlier
+// `< Reset >` button on row 10 was removed when the sim TUI's Clock
+// window went away — Hardware → Reset menu + Z hotkey + the menu-
+// bar tray cover the same action with less visual clutter.
 
 func formatHz(hz float64) string {
 	switch {
@@ -126,68 +115,6 @@ func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.The
 		p.sampleHalf = hc
 	}
 	c.Put(0, 8, fmt.Sprintf("Rate:       %s", formatHz(p.rate/2)), style)
-
-	// Reset button — chrome style normally, theme.Focus when armed.
-	chrome := tcell.StyleDefault.
-		Background(theme.Palette.Cyan).
-		Foreground(theme.Palette.Blue)
-	bx := p.resetButtonX()
-	btnStyle := chrome
-	if p.pressed && p.armed {
-		btnStyle = theme.Focus
-	}
-	c.Put(bx, resetButtonY, resetButtonLabel, btnStyle)
-}
-
-// resetButtonX returns the logical x-origin of the centered Reset
-// button. Recomputed each Draw so it follows the natural width if
-// MinW changes.
-func (p *Provider) resetButtonX() int {
-	w, _ := p.LastViewport()
-	if w < resetButtonW {
-		return 0
-	}
-	return (w - resetButtonW) / 2
-}
-
-func (p *Provider) buttonHit(mx, my int, inner foxpro.Rect) bool {
-	lx := (mx - inner.X) + p.X
-	ly := (my - inner.Y) + p.Y
-	bx := p.resetButtonX()
-	return ly == resetButtonY && lx >= bx && lx < bx+resetButtonW
-}
-
-func (p *Provider) HandleMouse(ev *tcell.EventMouse, inner foxpro.Rect) bool {
-	if ev.Buttons()&tcell.Button1 == 0 {
-		return false
-	}
-	if p.OnReset == nil {
-		return false
-	}
-	mx, my := ev.Position()
-	if p.buttonHit(mx, my, inner) {
-		p.pressed = true
-		p.armed = true
-		return true
-	}
-	return false
-}
-
-func (p *Provider) HandleMouseMotion(ev *tcell.EventMouse, inner foxpro.Rect) {
-	if !p.pressed {
-		return
-	}
-	mx, my := ev.Position()
-	p.armed = p.buttonHit(mx, my, inner)
-}
-
-func (p *Provider) HandleMouseRelease(ev *tcell.EventMouse, inner foxpro.Rect) {
-	fire := p.pressed && p.armed
-	p.pressed = false
-	p.armed = false
-	if fire && p.OnReset != nil {
-		p.OnReset()
-	}
 }
 
 func (p *Provider) HandleKey(ev *tcell.EventKey) bool {

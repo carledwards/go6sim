@@ -32,9 +32,20 @@ type Provider struct {
 	foxpro.ScrollState
 }
 
-// Draw paints the register dump. Layout (rough):
+// Draw paints the register dump. Sections are ordered by how often
+// users read them while debugging a typical 6502/VIA program: Ports
+// first (the pins driving the demo's LEDs / display / inputs are the
+// observable side), then Timer 1 (the most-used interrupt source),
+// then the control-register decode (ACR / IFR / IER) for when timer
+// behaviour is mysterious.
 //
-//	[$A810]  Crystal: 1 MHz
+// The chip's base address + crystal speed live in the window title
+// (set by the owning command at construction) rather than the first
+// rendered row — saves two screen rows and lets the pane sit higher.
+//
+//	╶ Ports ───────────────────────────────╴
+//	  ORA  $00  DDRA $00      ORB  $00  DDRB $00
+//	  SR   $00  PCR  $00      T2: (Phase 2)
 //	╶ Timer 1 ─────────────────────────────╴
 //	  Counter   $C2A4   49828
 //	  Latch     $C350   50000
@@ -45,9 +56,6 @@ type Provider struct {
 //	              .  ●  .  .   .   .   .   .
 //	  IER  $80   IRQ T1 T2 CB1 CB2 SR  CA1 CA2
 //	              ●  .  .  .   .   .   .   .
-//	╶ Ports / Misc ────────────────────────╴
-//	  ORA  $00  DDRA $00     ORB  $00  DDRB $00
-//	  SR   $00  PCR  $00     T2: (Phase 2)
 func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.Theme, focused bool) {
 	bg := theme.WindowBG
 	hdr := bg.Foreground(theme.Palette.Yellow)
@@ -62,10 +70,15 @@ func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.The
 	}
 	s := p.VIA.Snapshot()
 
-	c.Put(0, 0, fmt.Sprintf("[$%04X]  Crystal: %s", p.Base, formatHz(s.CrystalHz)), hdr)
+	// --- Ports (top: the observable surface of the chip) ---
+	c.Put(0, 0, "─ Ports ─────────────────────────────────────────", hdr)
+	c.Put(2, 1, fmt.Sprintf("ORA  $%02X  DDRA $%02X      ORB  $%02X  DDRB $%02X",
+		s.ORA, s.DDRA, s.ORB, s.DDRB), bg)
+	c.Put(2, 2, fmt.Sprintf("SR   $%02X  PCR  $%02X      ", s.SR, s.PCR), bg)
+	c.Put(36, 2, "T2: (Phase 2)", dim)
 
 	// --- Timer 1 ---
-	c.Put(0, 2, "─ Timer 1 ───────────────────────────────────────", hdr)
+	c.Put(0, 4, "─ Timer 1 ───────────────────────────────────────", hdr)
 
 	mode := "one-shot"
 	if s.T1FreeRun {
@@ -77,37 +90,29 @@ func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.The
 	// latch rows and call out the disarmed state — without this the
 	// reader assumes "stuck counter = broken simulator".
 	if !s.T1Armed {
-		c.Put(2, 3, fmt.Sprintf("Counter   $%04X   %5d", s.T1Counter, s.T1Counter), dim)
-		c.Put(2, 4, fmt.Sprintf("Latch     $%04X   %5d", s.T1Latch, s.T1Latch), dim)
-		c.Put(2, 5, fmt.Sprintf("Mode      %-10s", mode), dim)
+		c.Put(2, 5, fmt.Sprintf("Counter   $%04X   %5d", s.T1Counter, s.T1Counter), dim)
+		c.Put(2, 6, fmt.Sprintf("Latch     $%04X   %5d", s.T1Latch, s.T1Latch), dim)
+		c.Put(2, 7, fmt.Sprintf("Mode      %-10s", mode), dim)
 		warn := bg.Foreground(theme.Palette.Yellow)
-		c.Put(2, 6, fmt.Sprintf("DISARMED — write T1C-H ($%04X) to start the timer", p.Base+via.RegT1CH), warn)
+		c.Put(2, 8, fmt.Sprintf("DISARMED — write T1C-H ($%04X) to start the timer", p.Base+via.RegT1CH), warn)
 	} else {
-		c.Put(2, 3, fmt.Sprintf("Counter   $%04X   %5d", s.T1Counter, s.T1Counter), bg)
-		c.Put(2, 4, fmt.Sprintf("Latch     $%04X   %5d", s.T1Latch, s.T1Latch), bg)
-		c.Put(2, 5, fmt.Sprintf("Mode      %-10s   Armed: yes", mode), bg)
+		c.Put(2, 5, fmt.Sprintf("Counter   $%04X   %5d", s.T1Counter, s.T1Counter), bg)
+		c.Put(2, 6, fmt.Sprintf("Latch     $%04X   %5d", s.T1Latch, s.T1Latch), bg)
+		c.Put(2, 7, fmt.Sprintf("Mode      %-10s   Armed: yes", mode), bg)
 	}
 
 	// --- ACR / IFR / IER ---
-	c.Put(0, 7, "─ ACR / IFR / IER ───────────────────────────────", hdr)
-	c.Put(2, 8, fmt.Sprintf("ACR  $%02X   %s", s.ACR, decodeACR(s.ACR)), bg)
+	c.Put(0, 9, "─ ACR / IFR / IER ───────────────────────────────", hdr)
+	c.Put(2, 10, fmt.Sprintf("ACR  $%02X   %s", s.ACR, decodeACR(s.ACR)), bg)
 
 	bits := []string{"CA2", "CA1", "SR", "CB2", "CB1", "T2", "T1", "IRQ"}
-	// Print IFR row + dot row.
-	c.Put(2, 9, fmt.Sprintf("IFR  $%02X  ", s.IFR), bg)
-	drawBitTable(c, 14, 9, 10, bits, bg, hdr)
-	drawBitDots(c, 14, 10, s.IFR, bits, bg, on)
+	c.Put(2, 11, fmt.Sprintf("IFR  $%02X  ", s.IFR), bg)
+	drawBitTable(c, 14, 11, 12, bits, bg, hdr)
+	drawBitDots(c, 14, 12, s.IFR, bits, bg, on)
 
-	c.Put(2, 12, fmt.Sprintf("IER  $%02X  ", s.IER|0x80), bg)
-	drawBitTable(c, 14, 12, 13, bits, bg, hdr)
-	drawBitDots(c, 14, 13, s.IER|0x80, bits, bg, on)
-
-	// --- Ports / Misc ---
-	c.Put(0, 15, "─ Ports / Misc ──────────────────────────────────", hdr)
-	c.Put(2, 16, fmt.Sprintf("ORA  $%02X  DDRA $%02X     ORB  $%02X  DDRB $%02X",
-		s.ORA, s.DDRA, s.ORB, s.DDRB), bg)
-	c.Put(2, 17, fmt.Sprintf("SR   $%02X  PCR  $%02X     ", s.SR, s.PCR), bg)
-	c.Put(36, 17, "T2: (Phase 2)", dim)
+	c.Put(2, 14, fmt.Sprintf("IER  $%02X  ", s.IER|0x80), bg)
+	drawBitTable(c, 14, 14, 15, bits, bg, hdr)
+	drawBitDots(c, 14, 15, s.IER|0x80, bits, bg, on)
 }
 
 // drawBitTable prints bit names left-to-right at (x,y). Bit 7 first,
@@ -150,7 +155,10 @@ func decodeACR(acr byte) string {
 	return fmt.Sprintf("T1=%-9s  PB7=%-7s  T2=- SR=- PB=- PA=-", t1, pb7)
 }
 
-func formatHz(hz uint64) string {
+// FormatHz formats a crystal frequency for display. Exported so the
+// owning command can use the same string in the window title bar
+// (where the chip's base address + crystal speed now live).
+func FormatHz(hz uint64) string {
 	switch {
 	case hz >= 1_000_000:
 		return fmt.Sprintf("%d MHz", hz/1_000_000)

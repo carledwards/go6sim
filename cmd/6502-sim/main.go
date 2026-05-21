@@ -16,6 +16,7 @@ import (
 	"github.com/carledwards/go6sim/asm"
 	"github.com/carledwards/go6sim/backplane"
 	"github.com/carledwards/go6sim/bridge"
+	"github.com/carledwards/go6sim/internal/monitor"
 	"github.com/carledwards/go6sim/bus"
 	"github.com/carledwards/go6sim/clock"
 	"github.com/carledwards/go6sim/components/display"
@@ -252,7 +253,7 @@ func main() {
 
 	cpuProv := &cpuwin.Provider{Backend: backend}
 	cpuWindow := addWindow(cpuTitle,
-		foxpro.Rect{X: 2, Y: 1, W: 38, H: 13},
+		foxpro.Rect{X: 2, Y: 1, W: 38, H: 11},
 		cpuProv,
 		cpuwin.MinW, cpuwin.MinH)
 
@@ -267,7 +268,7 @@ func main() {
 		Symbols:      mergeSymbols(bootDemo.Symbols),
 		Annotations:  bootDemo.Annotations,
 	}
-	memWin := addWindow("Memory",
+	memWin := addWindow("RAM",
 		foxpro.Rect{X: 42, Y: 1, W: 76, H: 14},
 		ramProv,
 		ramwin.MinW, ramwin.MinH)
@@ -285,7 +286,7 @@ func main() {
 		Symbols:      mergeSymbols(bootDemo.Symbols),
 		Annotations:  bootDemo.Annotations,
 	}
-	romWin := addWindow("Memory",
+	romWin := addWindow("ROM",
 		foxpro.Rect{X: 42, Y: 16, W: 76, H: 8},
 		romProv,
 		ramwin.MinW, ramwin.MinH)
@@ -346,16 +347,56 @@ func main() {
 		// responsive while letting fast backends (interp) cruise.
 		clockProv.MaxBatch = autoTune(backend, 35*time.Millisecond)
 	}
-	addWindow("Clock",
-		foxpro.Rect{X: 2, Y: 13, W: 38, H: 7},
-		clockProv,
-		clockwin.MinW, clockwin.MinH)
+	// Clock window deliberately omitted — the tray indicator (top-
+	// right of the menu bar) shows running/stopped + current Hz and
+	// is clickable, and the Run + Hardware menus cover every action
+	// the window had. clockProv stays — it's the driver-state holder
+	// for the run loop, scope hook, speed picker, and reset path.
 
 	viaProv := &viawin.Provider{VIA: via1, Base: viaBase}
-	addWindow("I/O",
-		foxpro.Rect{X: 2, Y: 21, W: 56, H: 20},
+	// Title carries the dynamic context that used to be the first
+	// rendered row of the window. Frees two screen rows (header +
+	// blank separator) so the chip's body fits a smaller pane and
+	// the window can move up under the CPU pane.
+	viaTitle := fmt.Sprintf("VIA 1 — $%04X @ %s", viaBase, viawin.FormatHz(via1.CrystalHz()))
+	addWindow(viaTitle,
+		foxpro.Rect{X: 2, Y: 13, W: 56, H: 18},
 		viaProv,
 		viawin.MinW, viawin.MinH)
+
+	// Monitor — the shared REPL pane, plugged in via HubDirect (no
+	// TCP, just direct Go calls into sharedHub). Same Monitor code
+	// drives cmd/6502-control over the wire and this in-process
+	// edge; that's the bridge.Target facade paying off.
+	simHost := newSimHost(
+		"Sim TUI (shared)",
+		"the TUI's live machine — shared via direct in-process target",
+		simTUIRegions,
+	)
+	hubDirect := bridge.NewHubDirect(sharedHub)
+	mon := monitor.New(simHost, hubDirect)
+	// Default position: centred-ish, fits in a typical 100×30 to
+	// 120×40 terminal without clipping. User can drag once visible.
+	// The previous bottom-right placement put most of the window
+	// off-screen on common terminal sizes — fully visible matters
+	// more than "not overlapping existing windows," especially
+	// since toggling it on already Raises it above whatever's
+	// underneath.
+	monitorWin := addWindow("Monitor",
+		foxpro.Rect{X: 10, Y: 8, W: 80, H: 20},
+		mon,
+		20, 5)
+	// Hide by default — the sim TUI is already screen-dense; users
+	// pop it via the View menu when they want REPL access. Same
+	// pattern the Scope window uses below.
+	app.Manager.Remove(monitorWin)
+	mon.AddEvent("system", "Monitor opened (in-process target)")
+	mon.AddEvent("system", "type 'help' or '?' for commands")
+	// Consume HubDirect notifications and forward to the Monitor's
+	// scrollback as event lines. bp.hit / clock.halt / tap.changed
+	// surface to the user; state.snapshot is dropped (the sim TUI's
+	// CPU pane reads inst directly, no mirror needed here).
+	go consumeHubDirectNotifications(hubDirect, mon)
 
 	// Logic-analyzer scope: 256 cycles of trace history. Hidden by
 	// default — toggled via the Window menu. In TUI mode the canvas
@@ -399,7 +440,6 @@ func main() {
 		// Repaint is a UI op — fine to call from the caller's thread.
 		paintInitialDisplay()
 	}
-	cpuProv.OnReset = machineReset
 
 	dispProv := &displaywin.Provider{
 		// inner bus so the window's own hex-dump reads don't pollute
@@ -497,10 +537,14 @@ func main() {
 		// CPU is paused / stepping.
 	})
 
-	// Global key bindings. Active in any focused window so the user
-	// can drive the simulator without first focusing the Clock window.
+	// Global key bindings. Active in any focused window EXCEPT
+	// Monitor — when the Monitor's REPL is focused, runes flow to
+	// its input editor (typing `reset` shouldn't fire 4 hotkeys).
 	app.OnKey = func(ev *tcell.EventKey) bool {
 		if ev.Key() != tcell.KeyRune {
+			return false
+		}
+		if app.Manager.Active() == monitorWin {
 			return false
 		}
 		// Clock-affecting keys route through the Hub — same path the
@@ -674,9 +718,29 @@ func main() {
 			Items: []foxpro.MenuItem{
 				{Label: "&Command", Hotkey: "Ctrl+F2", OnSelect: app.ToggleCommandWindow},
 				{Label: "C&ycle", Hotkey: "F6", OnSelect: app.Manager.FocusNext},
+				{Separator: true},
+				{Label: "Toggle &Monitor", OnSelect: func() {
+					if app.Manager.Contains(monitorWin) {
+						app.Manager.Remove(monitorWin)
+					} else {
+						app.Manager.Add(monitorWin)
+						app.Manager.Raise(monitorWin)
+					}
+				}},
 			},
 		},
 	})
+
+	// Plumb the SimHost's quit + help-window hooks now that app
+	// is fully constructed. The Monitor's `q` / `quit` and `help
+	// window` commands route through these closures.
+	simHost.quit = app.Quit
+	simHost.helpOpener = func() {
+		hw := foxpro.NewWindow("Help — Monitor",
+			foxpro.Rect{X: 6, Y: 2, W: 70, H: 32},
+			foxpro.NewTextProvider(monitor.HelpTable))
+		app.Manager.Add(hw)
+	}
 
 	// Live tray — top-right of the menu bar. Three cells, each
 	// clickable: speed (opens picker), running/stopped (toggles),

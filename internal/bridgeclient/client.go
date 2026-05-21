@@ -26,12 +26,18 @@ import (
 	"github.com/carledwards/go6sim/bridge"
 )
 
-// Notification mirrors a JSON-RPC notification frame the server pushes
-// (no id, method+params). Channels are server → client only.
-type Notification struct {
-	Method string
-	Params json.RawMessage
-}
+// Notification is re-exported as a type alias for bridge.Notification
+// so existing consumers (bridgeclient.Notification) keep working while
+// the canonical type lives in the bridge package next to the Target
+// interface. New code should reference bridge.Notification directly.
+type Notification = bridge.Notification
+
+// Compile-time assertion that *Client implements bridge.Target —
+// the wire side of the protocol. If a new method gets added to the
+// Target interface, the build breaks here until Client grows the
+// matching wrapper. That's the discipline the interface exists to
+// enforce.
+var _ bridge.Target = (*Client)(nil)
 
 // Client wraps an io.ReadWriteCloser carrying NDJSON-framed JSON-RPC
 // 2.0. The reader goroutine demuxes responses (id-matched) and
