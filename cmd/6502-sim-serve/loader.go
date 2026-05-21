@@ -1,10 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/carledwards/go6sim/bridge"
-	"github.com/carledwards/go6sim/instrument"
 	"github.com/carledwards/go6sim/machine"
 )
 
@@ -16,13 +16,13 @@ type presetLoader struct{}
 
 func (presetLoader) Presets() []bridge.PresetInfo {
 	return []bridge.PresetInfo{
-		{Name: "teach-min", Summary: "RAM + framebuffer RAM + 6522 VIA + ROM"},
-		{Name: "teach-merlin", Summary: "RAM + two 6522 VIAs + ROM (multi-VIA)"},
-		{Name: "vic-demo", Summary: "Standalone VIC display demo (color/char planes + controller + VIA)"},
+		{Name: "teach-min", Label: "Teach Minimal", Summary: "RAM + framebuffer RAM + 6522 VIA + ROM"},
+		{Name: "teach-merlin", Label: "Teach Merlin", Summary: "RAM + two 6522 VIAs + ROM (multi-VIA)"},
+		{Name: "vic-demo", Label: "VIC Demo", Summary: "Standalone VIC display demo (color/char planes + controller + VIA)"},
 	}
 }
 
-func (presetLoader) Load(name string, image []byte) (*instrument.Instrument, []bridge.Region, error) {
+func (presetLoader) Load(name string, image []byte) (*bridge.Hub, func(), error) {
 	var m *machine.Machine
 	var regs []bridge.Region
 
@@ -60,5 +60,14 @@ func (presetLoader) Load(name string, image []byte) (*instrument.Instrument, []b
 			return nil, nil, fmt.Errorf("loading image: %w", err)
 		}
 	}
-	return m.Inst, regs, nil
+	// Per-session Hub: each bridge connection gets its own Pump.
+	// cleanup cancels it on session teardown.
+	hub := bridge.NewHub(m.Inst, regs, name)
+	ctx, cancel := context.WithCancel(context.Background())
+	go hub.Run(ctx)
+	cleanup := func() {
+		cancel()
+		<-hub.Done()
+	}
+	return hub, cleanup, nil
 }

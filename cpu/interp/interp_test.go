@@ -105,6 +105,101 @@ func TestAdcCarryLoop(t *testing.T) {
 	}
 }
 
+// nmiBus wraps a bus.Bus and exposes a controllable NMI line so we
+// can test interp's NMI edge-detection directly without going
+// through the backplane / Hub / pump stack.
+type nmiBus struct {
+	bus.Bus
+	nmi bool
+}
+
+func (n *nmiBus) NMI() bool { return n.nmi }
+
+// TestNMIEdgeFiresOnRisingEdge — interp should service NMI exactly
+// once per rising edge of the line. Holding NMI asserted across many
+// instruction boundaries must NOT re-trigger; the source has to drop
+// the line and reassert it for a second service.
+func TestNMIEdgeFiresOnRisingEdge(t *testing.T) {
+	inner := bus.New()
+	mainRAM := ram.New("ram", 0x0000, 0x200)
+	mainROM := rom.New("rom", 0xE000, 0x2000)
+
+	// $E000  JMP $E000    (tight loop)
+	// $E100  STA $0050    ; "NMI handler" — writes a sentinel
+	// $E103  RTI          ; return so the next pulse can fire again
+	if err := mainROM.Load(0, []uint8{0x4C, 0x00, 0xE0}); err != nil {
+		t.Fatalf("rom load: %v", err)
+	}
+	if err := mainROM.Load(0x0100, []uint8{0x8D, 0x50, 0x00, 0x40}); err != nil {
+		t.Fatalf("handler load: %v", err)
+	}
+	if err := mainROM.SetResetVector(0xE000); err != nil {
+		t.Fatalf("reset vector: %v", err)
+	}
+	// NMI vector at $FFFA → $E100. $FFFA offset within $E000-base ROM = 0x1FFA.
+	if err := mainROM.Load(0x1FFA, []uint8{0x00, 0xE1}); err != nil {
+		t.Fatalf("nmi vector: %v", err)
+	}
+	if err := inner.Register(mainRAM); err != nil {
+		t.Fatal(err)
+	}
+	if err := inner.Register(mainROM); err != nil {
+		t.Fatal(err)
+	}
+
+	nb := &nmiBus{Bus: inner}
+	be := interp.New(nb)
+	be.Reset()
+
+	// Count handler entries by sampling PC after each HalfStep —
+	// transitions FROM outside the handler range TO inside it count
+	// as one entry. Crude but doesn't require instrumenting interp.
+	insideHandler := func() bool {
+		pc := be.Registers().PC
+		return pc >= 0xE100 && pc < 0xE104
+	}
+	entries := 0
+	wasInside := false
+	step := func(n int) {
+		for i := 0; i < n; i++ {
+			be.HalfStep()
+			inside := insideHandler()
+			if inside && !wasInside {
+				entries++
+			}
+			wasInside = inside
+		}
+	}
+
+	// Pulse #1: assert NMI, give the CPU plenty of boundaries to
+	// observe + service it.
+	nb.nmi = true
+	step(60)
+	if entries != 1 {
+		t.Fatalf("after first pulse, entries=%d, want 1", entries)
+	}
+	nb.nmi = false
+
+	// Hold low: handler must NOT re-fire.
+	step(60)
+	if entries != 1 {
+		t.Errorf("NMI deasserted but handler re-fired (entries=%d, want 1)", entries)
+	}
+
+	// Pulse #2: rising edge — handler fires a second time.
+	nb.nmi = true
+	step(60)
+	if entries != 2 {
+		t.Errorf("after second pulse, entries=%d, want 2 (edge-trigger reset broken)", entries)
+	}
+
+	// Sustained high: holding past the service must NOT re-trigger.
+	step(400)
+	if entries != 2 {
+		t.Errorf("NMI held high re-triggered handler (entries=%d, want 2)", entries)
+	}
+}
+
 // JSR/RTS round-trip.
 func TestJsrRts(t *testing.T) {
 	b := bus.New()

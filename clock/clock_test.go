@@ -32,6 +32,32 @@ func (f *fakeCPU) IRQ() bool                { return true }
 func (f *fakeCPU) NMI() bool                { return true }
 func (f *fakeCPU) SYNC() bool               { return false }
 
+// fakeSyncCPU pulses SYNC=true every `cycleHalves` halfSteps and
+// keeps PC pinned at 0 — the test fixture for the JMP-self regression.
+// SYNC mimics the 6502 SYNC pin going high on the opcode-fetch
+// (boundary) cycle and low during burn cycles.
+type fakeSyncCPU struct {
+	pc          uint16
+	half        uint64
+	cycleHalves uint64 // SYNC rises at half % cycleHalves == 0
+}
+
+func (f *fakeSyncCPU) Reset()                       { f.half = 0 }
+func (f *fakeSyncCPU) HalfStep()                    { f.half++ }
+func (f *fakeSyncCPU) Registers() cpu.Registers     { return cpu.Registers{PC: f.pc} }
+func (f *fakeSyncCPU) HalfCycles() uint64           { return f.half }
+func (f *fakeSyncCPU) AddressBus() uint16           { return 0 }
+func (f *fakeSyncCPU) DataBus() uint8               { return 0 }
+func (f *fakeSyncCPU) ReadCycle() bool              { return true }
+func (f *fakeSyncCPU) IRQ() bool                    { return true }
+func (f *fakeSyncCPU) NMI() bool                    { return true }
+func (f *fakeSyncCPU) SYNC() bool {
+	if f.cycleHalves == 0 {
+		return false
+	}
+	return f.half%f.cycleHalves == 0 && f.half > 0
+}
+
 func TestStepOneAndObserverGate(t *testing.T) {
 	f := &fakeCPU{}
 	d := NewDriver(f)
@@ -56,6 +82,29 @@ func TestStepInstructionStopsOnPCChange(t *testing.T) {
 	d.StepInstruction()
 	if f.half != 4 || d.StepsDone() != 4 {
 		t.Fatalf("StepInstruction: half=%d steps=%d, want 4/4 (PC changes at 4)", f.half, d.StepsDone())
+	}
+}
+
+// TestStepInstructionStopsOnSyncRise — regression for the JMP-self
+// pattern. A CPU where PC NEVER changes (e.g., `JMP <self>`) used to
+// exhaust StepInstruction's 32-half budget every call because the
+// algorithm only watched PC. Now we also watch SYNC: each rising
+// edge means a boundary halfStep just executed an instruction, so
+// the call returns even though PC didn't move.
+//
+// fakeSyncCPU pulses SYNC=true every 3rd halfStep (mimicking a
+// 3-cycle JMP instruction); PC stays at 0.
+func TestStepInstructionStopsOnSyncRise(t *testing.T) {
+	f := &fakeSyncCPU{cycleHalves: 3}
+	d := NewDriver(f)
+	d.StepInstruction()
+	// Should return at the first SYNC rising edge — halfStep 3.
+	if f.half != 3 || d.StepsDone() != 3 {
+		t.Fatalf("StepInstruction (JMP-self): half=%d steps=%d, want 3/3 (SYNC rises at 3)",
+			f.half, d.StepsDone())
+	}
+	if f.pc != 0 {
+		t.Errorf("fakeSyncCPU.pc moved (=$%04X); test fixture should hold PC at 0", f.pc)
 	}
 }
 

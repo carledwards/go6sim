@@ -67,3 +67,13 @@ type Backend interface {
 	// cycle count.
 	SYNC() bool
 }
+
+// PCSetter is the optional capability of backends that can have PC
+// rewritten from outside the CPU's normal instruction stream — useful
+// for debugger "go from <addr>" commands. interp implements this
+// (PC is a plain field); netsim doesn't (the netsim CPU reconstructs
+// PC from transistor-level state and has no public setter). Callers
+// type-assert to detect support and surface a clear error otherwise.
+type PCSetter interface {
+	SetPC(pc uint16)
+}

@@ -1,6 +1,18 @@
-# go6sim Bridge Protocol — DESIGN
+# go6sim Bridge Protocol — DESIGN v1.0
 
-**Status:** draft — design decisions locked 2026-05-19; ready to
+**Status:** **superseded by [`bridge-v2.md`](bridge-v2.md)** (drafted
+2026-05-20). The v1.0 contract was implemented and shipped behind
+`bridge/`, `cmd/6502-sim-serve`, and `internal/bridgeclient`, but
+proved to be the wrong shape once a *shared* Instrument entered the
+picture (`cmd/6502-sim --serve`): the per-session execution runner
+fights the TUI's own clock pump. v2 pivots to a pub/sub model with
+one shared pump per Instrument; see that doc for the new contract.
+This document remains as the historical record and will be removed
+when v2 is implemented.
+
+---
+
+**Status (original):** draft — design decisions locked 2026-05-19; ready to
 implement. Source-of-truth design for the network surface that
 exposes `instrument.Instrument` to external clients (VS Code, MCP,
 future hardware bridges, any other editor).

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/carledwards/go6sim/bridge"
+	"github.com/carledwards/go6sim/internal/ndjson"
 )
 
 var (
@@ -96,7 +97,7 @@ func acceptLoop(ctx context.Context, ln net.Listener, srv *bridge.Server) error 
 		log.Printf("client connected: %s", conn.RemoteAddr())
 		go func(c net.Conn) {
 			defer log.Printf("client disconnected: %s", c.RemoteAddr())
-			if err := srv.Serve(ctx, newNDJSONConn(c)); err != nil {
+			if err := srv.Serve(ctx, ndjson.New(c)); err != nil {
 				log.Printf("client %s: serve: %v", c.RemoteAddr(), err)
 			}
 		}(conn)

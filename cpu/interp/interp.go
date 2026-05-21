@@ -58,6 +58,14 @@ type Adapter struct {
 	// breakpoint and Taps. interp models BRK only; hardware IRQ
 	// delivery is a separate feature (docs/architecture-backplane.md).
 	brkCount uint64
+
+	// prevNMI remembers whether the bus's NMI line was asserted at
+	// the last instruction boundary. The 6502 services NMI on a
+	// rising edge (false → true sample), so we fire serviceNMI only
+	// when the current sample is asserted AND the previous was not.
+	// Released by the assertion source (the Pump's auto-deassert)
+	// before the next pulse.
+	prevNMI bool
 }
 
 // New creates an Adapter wired to the given bus. Call Reset before
@@ -80,13 +88,18 @@ func (a *Adapter) HalfStep() {
 		a.halfCyclesLeft--
 		a.sync = false
 	} else {
-		// At an instruction boundary a real 6502 services a pending
-		// IRQ instead of fetching the next opcode (brick 9b). Gated on
-		// the I-flag and a card actually pulling the line, so programs
-		// that never enable interrupts stay byte-identical.
-		if a.irqPending() {
+		// At an instruction boundary a real 6502 prioritises
+		// NMI > IRQ > normal-fetch. NMI is edge-triggered (rising
+		// edge of the line); IRQ is level-sensitive AND gated on the
+		// I-flag. Either path runs in place of the next opcode
+		// fetch so programs that never invoke interrupts stay
+		// byte-identical.
+		switch {
+		case a.nmiEdge():
+			a.serviceNMI()
+		case a.irqPending():
 			a.serviceIRQ()
-		} else {
+		default:
 			a.execute()
 		}
 		// Mirror a real 6502's SYNC line going high during opcode
@@ -100,6 +113,17 @@ func (a *Adapter) HalfStep() {
 
 func (a *Adapter) Registers() cpu.Registers {
 	return cpu.Registers{A: a.a, X: a.x, Y: a.y, S: a.sp, P: a.p, PC: a.pc}
+}
+
+// SetPC overwrites the program counter and resets the half-cycle
+// accumulator so the next HalfStep treats the address as an
+// instruction-boundary fetch. Implements cpu.PCSetter — the
+// debugger uses it for the "g <addr>" flow (set PC then run).
+func (a *Adapter) SetPC(pc uint16) {
+	a.pc = pc
+	a.halfCyclesLeft = 0
+	a.sync = false
+	a.prevNMI = false // edge-trigger surface starts fresh after a manual jump
 }
 
 // irqPending reports whether the backplane is asserting the shared IRQ
@@ -123,6 +147,36 @@ func (a *Adapter) serviceIRQ() {
 	a.push((a.p | flagU) &^ flagB)
 	a.setFlag(flagI, true)
 	a.pc = a.read16(0xFFFE)
+	a.halfCyclesLeft = 2*7 - 1
+}
+
+// nmiEdge reports whether the bus's NMI line just transitioned from
+// inactive to asserted since the previous instruction boundary —
+// i.e., a rising edge. NMI on the 6502 is edge-triggered: holding
+// the line asserted across many boundaries fires it ONCE, until the
+// source deasserts and re-asserts. The bus may not implement a
+// reader (older wirings); in that case we never fire NMI.
+func (a *Adapter) nmiEdge() bool {
+	src, ok := a.bus.(interface{ NMI() bool })
+	if !ok {
+		return false
+	}
+	curr := src.NMI()
+	edge := curr && !a.prevNMI
+	a.prevNMI = curr
+	return edge
+}
+
+// serviceNMI runs the 6502 hardware-NMI sequence: push PC and P (B
+// clear, U set), vector through $FFFA. 7 cycles. Differs from IRQ in
+// the vector and in NOT setting I — NMI can preempt itself (in
+// principle; the edge gate prevents a re-fire while the line is
+// still asserted).
+func (a *Adapter) serviceNMI() {
+	a.push(uint8(a.pc >> 8))
+	a.push(uint8(a.pc))
+	a.push((a.p | flagU) &^ flagB)
+	a.pc = a.read16(0xFFFA)
 	a.halfCyclesLeft = 2*7 - 1
 }
 

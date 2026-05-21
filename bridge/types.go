@@ -43,8 +43,14 @@ type HelloResult struct {
 
 // machine.list
 
+// PresetInfo describes one preset a server can build. Name is the
+// machine-readable slug used by machine.load; Label is the
+// human-readable display string; Summary is a one-line description of
+// what the preset contains. Clients should display Label (falling
+// back to Name) and Summary; Name is for programmatic addressing.
 type PresetInfo struct {
 	Name    string `json:"name"`
+	Label   string `json:"label,omitempty"`
 	Summary string `json:"summary"`
 }
 
@@ -71,8 +77,14 @@ type Region struct {
 	ReadOnly bool   `json:"readOnly"`
 }
 
+// MachineLoadResult is what machine.load returns. Preset is the slug
+// the client requested (echoed). Label + Summary are the human strings
+// the server records for that preset — clients render those rather
+// than the slug so the display reflects the machine, not its key.
 type MachineLoadResult struct {
 	Preset  string   `json:"preset"`
+	Label   string   `json:"label,omitempty"`
+	Summary string   `json:"summary,omitempty"`
 	Regions []Region `json:"regions"`
 }
 
@@ -87,6 +99,18 @@ type CPUState struct {
 	PC         uint16 `json:"pc"`
 	HalfCycles uint64 `json:"halfCycles"`
 	Running    bool   `json:"running"`
+}
+
+// cpu.setPC — overwrite the program counter. Backend must implement
+// cpu.PCSetter (interp does; netsim does not because the upstream
+// netsim-go module exposes no register setters).
+type CPUSetPCParams struct {
+	PC uint16 `json:"pc"`
+}
+
+type CPUSetPCResult struct {
+	OK    bool     `json:"ok"`
+	State CPUState `json:"state"`
 }
 
 // clock.*

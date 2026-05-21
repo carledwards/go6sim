@@ -147,21 +147,46 @@ func (d *Driver) StepOne() {
 	d.stepsDone++
 }
 
-// StepInstruction runs HalfSteps until PC changes from its entry value.
-// Bounded by maxStepHalves so a stuck CPU can't lock the caller. For
-// interp this advances exactly one instruction; for netsim it advances
-// to the next PC change.
+// StepInstruction runs HalfSteps until one instruction has fully
+// executed, detected by whichever of two signals fires first:
+//
+//   1. SYNC rising edge (false→true). The boundary halfStep is when
+//      the CPU FETCHES + executes the next opcode; in interp's model
+//      execute() runs the whole instruction's logic in that one
+//      halfStep. So one sync false→true transition == one instruction
+//      executed. Critical for the idiomatic 6502 idle pattern
+//      `JMP <self>` where PC literally does NOT change — without
+//      this, the loop exhausted its budget every call.
+//
+//   2. PC change from the entry value. Catches backends with
+//      simplified SYNC behaviour (e.g., the minimal fakeCPU in
+//      clock_test.go that always returns SYNC=false). Also serves
+//      as a defence-in-depth signal whenever PC moves.
+//
+// Either path returns immediately. Bounded by maxStepHalves so a
+// pathological backend can't lock the caller.
 const maxStepHalves = 32
 
 func (d *Driver) StepInstruction() {
 	if d.running {
 		return
 	}
-	start := d.Backend.Registers().PC
+	startPC := d.Backend.Registers().PC
+	prevSync := d.Backend.SYNC()
 	for i := 0; i < maxStepHalves; i++ {
 		d.halfStep()
 		d.stepsDone++
-		if d.Backend.Registers().PC != start {
+		// Primary signal: SYNC just rose — boundary halfStep fired
+		// (fetch + execute). One instruction's logic just ran.
+		curr := d.Backend.SYNC()
+		if curr && !prevSync {
+			return
+		}
+		prevSync = curr
+		// Fast-path / fallback: PC advanced. Catches backends that
+		// don't model SYNC realistically, and gives a redundant
+		// success criterion when PC moves anyway.
+		if d.Backend.Registers().PC != startPC {
 			return
 		}
 	}

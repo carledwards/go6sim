@@ -146,16 +146,18 @@ func TestPresetLoaderShapes(t *testing.T) {
 		if !names[want] {
 			t.Errorf("Presets missing %q", want)
 		}
-		inst, regs, err := pl.Load(want, nil)
+		hub, cleanup, err := pl.Load(want, nil)
 		if err != nil {
 			t.Errorf("Load %q: %v", want, err)
 			continue
 		}
-		if inst == nil {
-			t.Errorf("Load %q: nil Instrument", want)
-		}
-		if len(regs) == 0 {
+		if hub == nil {
+			t.Errorf("Load %q: nil Hub", want)
+		} else if len(hub.Regions()) == 0 {
 			t.Errorf("Load %q: no regions", want)
+		}
+		if cleanup != nil {
+			cleanup()
 		}
 	}
 	if _, _, err := pl.Load("nope", nil); err == nil {

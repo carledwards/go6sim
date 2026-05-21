@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/carledwards/go6sim/bridge"
-	"github.com/carledwards/go6sim/instrument"
 	"github.com/carledwards/go6sim/machine"
 )
 
@@ -22,13 +21,13 @@ type stubLoader struct{}
 
 func (stubLoader) Presets() []bridge.PresetInfo {
 	return []bridge.PresetInfo{
-		{Name: "teach-min", Summary: "RAM + framebuffer RAM + VIA + ROM"},
-		{Name: "teach-merlin", Summary: "RAM + two VIAs + ROM (multi-VIA)"},
-		{Name: "vic-demo", Summary: "standalone VIC display demo"},
+		{Name: "teach-min", Label: "Teach Minimal", Summary: "RAM + framebuffer RAM + VIA + ROM"},
+		{Name: "teach-merlin", Label: "Teach Merlin", Summary: "RAM + two VIAs + ROM (multi-VIA)"},
+		{Name: "vic-demo", Label: "VIC Demo", Summary: "standalone VIC display demo"},
 	}
 }
 
-func (stubLoader) Load(name string, image []byte) (*instrument.Instrument, []bridge.Region, error) {
+func (stubLoader) Load(name string, image []byte) (*bridge.Hub, func(), error) {
 	var m *machine.Machine
 	var regs []bridge.Region
 	switch name {
@@ -58,7 +57,17 @@ func (stubLoader) Load(name string, image []byte) (*instrument.Instrument, []bri
 			return nil, nil, err
 		}
 	}
-	return m.Inst, regs, nil
+	// Tests want unpaced execution; the default 10 Hz makes everything
+	// time out under the new Hub pacing path.
+	m.Inst.Driver().SetSpeedHz(0)
+	hub := bridge.NewHub(m.Inst, regs, name)
+	ctx, cancel := context.WithCancel(context.Background())
+	go hub.Run(ctx)
+	cleanup := func() {
+		cancel()
+		<-hub.Done()
+	}
+	return hub, cleanup, nil
 }
 
 // client is a tiny in-process JSON-RPC client over a Conn — only what
@@ -183,6 +192,15 @@ func TestHelloAndCPUState(t *testing.T) {
 	if len(lr.Regions) == 0 {
 		t.Fatalf("machine.load regions empty; expected ram/framebuffer/via1/rom")
 	}
+	// Verify the human-readable fields from the loader's Presets list
+	// round-tripped onto the load response — clients render these
+	// rather than the slug.
+	if lr.Label != "Teach Minimal" {
+		t.Errorf("machine.load label = %q, want %q", lr.Label, "Teach Minimal")
+	}
+	if lr.Summary == "" {
+		t.Errorf("machine.load summary empty; want loader's preset summary")
+	}
 
 	// 6. cpu.state now succeeds and reports a freshly-reset interp
 	//    CPU (SP=$FD per the 6502 reset sequence, not running yet).
@@ -206,9 +224,28 @@ func TestHelloAndCPUState(t *testing.T) {
 		t.Fatalf("no.such.method: got err=%v, want MethodNotFound", err)
 	}
 
-	// 8. machine.load with an unknown preset -> UnknownPreset.
+	// (v1 used to test "machine.load nope after load → UnknownPreset"
+	// here; v2 phase A allows machine.load to re-image an existing
+	// hub, so the loader is invoked first and returns the unknown-
+	// preset error. The shape changed; the assertion is dropped in
+	// favour of TestUnknownPresetBeforeLoad below.)
+}
+
+// TestUnknownPresetBeforeLoad verifies UnknownPreset still surfaces
+// when the very first machine.load names an unknown preset.
+func TestUnknownPresetBeforeLoad(t *testing.T) {
+	serverConn, clientConn := bridge.Pipe()
+	srv := bridge.NewServer(stubLoader{})
+	ctx, cancel := context.WithCancel(context.Background())
+	go srv.Serve(ctx, serverConn)
+	defer func() {
+		cancel()
+		_ = clientConn.Close()
+	}()
+	c := &client{conn: clientConn}
+	_, _ = c.call(t, "hello", bridge.HelloParams{Protocols: []string{bridge.Protocol}})
 	if _, err := c.call(t, "machine.load", bridge.MachineLoadParams{Preset: "nope"}); err == nil || err.Code != bridge.CodeUnknownPreset {
-		t.Fatalf("machine.load nope: got err=%v, want UnknownPreset", err)
+		t.Fatalf("machine.load nope (fresh session): got err=%v, want UnknownPreset", err)
 	}
 }
 
@@ -785,15 +822,17 @@ func TestClockStopAsync(t *testing.T) {
 }
 
 // TestStateSnapshotPeriodic verifies that state.snapshot notifications
-// fire on the default cadence (100 ms) while subscribed to the "state"
-// channel, and ONLY while subscribed (no spurious snapshots when not).
+// fire on the default cadence (≈100 ms) while subscribed to the
+// "state.snapshot" topic. End-to-end variant of the hub-level test:
+// proves the events actually make it across the JSON-RPC wire to the
+// session, not just to in-process subscribers.
 func TestStateSnapshotPeriodic(t *testing.T) {
 	infinite := []byte{0x4C, 0x00, 0xE0}
 	ac, cleanup := setupAsyncSession(t, "teach-min", infinite)
 	defer cleanup()
 
 	if _, err := ac.call("events.subscribe", bridge.EventsSubscribeParams{
-		Channels: []string{"state"},
+		Channels: []string{"state.snapshot"},
 	}); err != nil {
 		t.Fatalf("events.subscribe: %v", err)
 	}
@@ -832,9 +871,12 @@ func TestClockRunStateErrors(t *testing.T) {
 	ac, cleanup := setupAsyncSession(t, "teach-min", infinite)
 	defer cleanup()
 
-	if _, err := ac.call("clock.stop", nil); err == nil || err.Code != bridge.CodeNotInRun {
-		t.Fatalf("clock.stop while idle: got err=%v, want NotInRun", err)
-	}
+	// v2 Phase A note: in v1, clock.stop-while-idle returned
+	// NotInRun and clock.run-while-running returned NotInRun. In v2
+	// both are fire-and-forget no-ops at idempotent boundaries —
+	// the assertion is dropped. (A future "strict" flag could
+	// restore the v1 errors, but it's not the default v2 stance.)
+	_, _ = ac.call("clock.stop", nil) // no-op when idle in v2
 
 	_, _ = ac.call("events.subscribe", bridge.EventsSubscribeParams{
 		Channels: []string{"clock.halt"},
@@ -842,9 +884,9 @@ func TestClockRunStateErrors(t *testing.T) {
 	if _, err := ac.call("clock.run", nil); err != nil {
 		t.Fatalf("clock.run: %v", err)
 	}
-
-	if _, err := ac.call("clock.run", nil); err == nil || err.Code != bridge.CodeNotInRun {
-		t.Fatalf("clock.run while running: got err=%v, want NotInRun", err)
+	// Issuing clock.run again under v2 is a no-op (already running).
+	if _, err := ac.call("clock.run", nil); err != nil {
+		t.Fatalf("clock.run twice (v2 no-op): got err=%v, want nil", err)
 	}
 
 	if _, err := ac.call("clock.stop", nil); err != nil {
