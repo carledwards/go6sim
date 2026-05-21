@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/carledwards/go6sim/asm"
 	"github.com/carledwards/go6sim/backplane"
+	"github.com/carledwards/go6sim/bridge"
+	"github.com/carledwards/go6sim/internal/monitor"
 	"github.com/carledwards/go6sim/bus"
 	"github.com/carledwards/go6sim/clock"
 	"github.com/carledwards/go6sim/components/display"
@@ -106,6 +109,7 @@ func main() {
 	batchFlag := flag.Int("batch", 0, "max HalfSteps per UI tick (0 = auto-tune at startup based on the chosen backend)")
 	cpuProfile := flag.String("cpuprofile", "", "write CPU profile to file (active for the lifetime of the process)")
 	memProfile := flag.String("memprofile", "", "write heap profile to file at exit")
+	serveAddr := flag.String("serve", "", "expose the live machine over the bridge on this addr (e.g. 127.0.0.1:6502); empty = no listener. Loopback-only in v1.")
 	flag.Parse()
 
 	if *cpuProfile != "" {
@@ -249,7 +253,7 @@ func main() {
 
 	cpuProv := &cpuwin.Provider{Backend: backend}
 	cpuWindow := addWindow(cpuTitle,
-		foxpro.Rect{X: 2, Y: 1, W: 38, H: 13},
+		foxpro.Rect{X: 2, Y: 1, W: 38, H: 11},
 		cpuProv,
 		cpuwin.MinW, cpuwin.MinH)
 
@@ -264,7 +268,7 @@ func main() {
 		Symbols:      mergeSymbols(bootDemo.Symbols),
 		Annotations:  bootDemo.Annotations,
 	}
-	memWin := addWindow("Memory",
+	memWin := addWindow("RAM",
 		foxpro.Rect{X: 42, Y: 1, W: 76, H: 14},
 		ramProv,
 		ramwin.MinW, ramwin.MinH)
@@ -282,7 +286,7 @@ func main() {
 		Symbols:      mergeSymbols(bootDemo.Symbols),
 		Annotations:  bootDemo.Annotations,
 	}
-	romWin := addWindow("Memory",
+	romWin := addWindow("ROM",
 		foxpro.Rect{X: 42, Y: 16, W: 76, H: 8},
 		romProv,
 		ramwin.MinW, ramwin.MinH)
@@ -293,6 +297,48 @@ func main() {
 	drv := clock.NewDriver(backend)
 	clockProv := clockwin.NewProviderWithDriver(drv)
 	inst := instrument.New(bp, drv)
+
+	// --serve: attach a bridge listener to the live Instrument so a
+	// remote controller (cmd/6502-control) can drive this same TUI
+	// over the wire. When any client is connected, `remote.Active()`
+	// goes true and the keyboard handler suppresses Run/Stop/Step/
+	// Reset — clock ownership transfers to the controller (per the
+	// design decision: "controller takes over the clock"). See
+	// cmd/6502-sim/serve.go.
+	// Build the shared Hub up-front, always. The Pump is the sole
+	// driver of CPU + peripherals — the TUI's keyboard, menus, and any
+	// attached bridge sessions are all co-equal commanders sending
+	// into the same hub.commandsCh. No second pump, no lockout, no
+	// race. (The Hub heartbeats peripherals while idle so the 1 MHz
+	// crystal keeps running between steps — see hub.go.)
+	simTUIRegions := []bridge.Region{
+		{Name: "ram", Lo: 0x0000, Hi: 0x1FFF, ReadOnly: false},
+		{Name: "framebuffer", Lo: 0xA000, Hi: 0xA7FF, ReadOnly: false},
+		{Name: "via1", Lo: 0xB000, Hi: 0xB00F, ReadOnly: false},
+		{Name: "rom", Lo: 0xE000, Hi: 0xFFFF, ReadOnly: true},
+	}
+	sharedHub := bridge.NewHub(inst, simTUIRegions, "sim-tui")
+	hubCtx, cancelHub := context.WithCancel(context.Background())
+	go sharedHub.Run(hubCtx)
+	defer cancelHub()
+
+	remote := &RemoteState{} // kept for the serve listener; no longer used for lockout
+	if *serveAddr != "" {
+		loader := newSimTUILoader(sharedHub, func(image []byte) error {
+			mainROM.Clear()
+			if err := mainROM.Load(0, image); err != nil {
+				return err
+			}
+			if err := mainROM.SetResetVector(0xE000); err != nil {
+				return err
+			}
+			sharedHub.CmdReset()
+			return nil
+		})
+		if err := StartServe(context.Background(), *serveAddr, loader, remote); err != nil {
+			log.Fatalf("--serve: %v", err)
+		}
+	}
 	if *batchFlag > 0 {
 		clockProv.MaxBatch = *batchFlag
 	} else {
@@ -301,16 +347,56 @@ func main() {
 		// responsive while letting fast backends (interp) cruise.
 		clockProv.MaxBatch = autoTune(backend, 35*time.Millisecond)
 	}
-	addWindow("Clock",
-		foxpro.Rect{X: 2, Y: 13, W: 38, H: 7},
-		clockProv,
-		clockwin.MinW, clockwin.MinH)
+	// Clock window deliberately omitted — the tray indicator (top-
+	// right of the menu bar) shows running/stopped + current Hz and
+	// is clickable, and the Run + Hardware menus cover every action
+	// the window had. clockProv stays — it's the driver-state holder
+	// for the run loop, scope hook, speed picker, and reset path.
 
 	viaProv := &viawin.Provider{VIA: via1, Base: viaBase}
-	addWindow("I/O",
-		foxpro.Rect{X: 2, Y: 21, W: 56, H: 20},
+	// Title carries the dynamic context that used to be the first
+	// rendered row of the window. Frees two screen rows (header +
+	// blank separator) so the chip's body fits a smaller pane and
+	// the window can move up under the CPU pane.
+	viaTitle := fmt.Sprintf("VIA 1 — $%04X @ %s", viaBase, viawin.FormatHz(via1.CrystalHz()))
+	addWindow(viaTitle,
+		foxpro.Rect{X: 2, Y: 13, W: 56, H: 18},
 		viaProv,
 		viawin.MinW, viawin.MinH)
+
+	// Monitor — the shared REPL pane, plugged in via HubDirect (no
+	// TCP, just direct Go calls into sharedHub). Same Monitor code
+	// drives cmd/6502-control over the wire and this in-process
+	// edge; that's the bridge.Target facade paying off.
+	simHost := newSimHost(
+		"Sim TUI (shared)",
+		"the TUI's live machine — shared via direct in-process target",
+		simTUIRegions,
+	)
+	hubDirect := bridge.NewHubDirect(sharedHub)
+	mon := monitor.New(simHost, hubDirect)
+	// Default position: centred-ish, fits in a typical 100×30 to
+	// 120×40 terminal without clipping. User can drag once visible.
+	// The previous bottom-right placement put most of the window
+	// off-screen on common terminal sizes — fully visible matters
+	// more than "not overlapping existing windows," especially
+	// since toggling it on already Raises it above whatever's
+	// underneath.
+	monitorWin := addWindow("Monitor",
+		foxpro.Rect{X: 10, Y: 8, W: 80, H: 20},
+		mon,
+		20, 5)
+	// Hide by default — the sim TUI is already screen-dense; users
+	// pop it via the View menu when they want REPL access. Same
+	// pattern the Scope window uses below.
+	app.Manager.Remove(monitorWin)
+	mon.AddEvent("system", "Monitor opened (in-process target)")
+	mon.AddEvent("system", "type 'help' or '?' for commands")
+	// Consume HubDirect notifications and forward to the Monitor's
+	// scrollback as event lines. bp.hit / clock.halt / tap.changed
+	// surface to the user; state.snapshot is dropped (the sim TUI's
+	// CPU pane reads inst directly, no mirror needed here).
+	go consumeHubDirectNotifications(hubDirect, mon)
 
 	// Logic-analyzer scope: 256 cycles of trace history. Hidden by
 	// default — toggled via the Window menu. In TUI mode the canvas
@@ -341,14 +427,19 @@ func main() {
 	// running and the demo restarts immediately. If it was stopped,
 	// it stays stopped until the user hits R.
 	machineReset := func() {
-		dispCtrl.Reset()
-		mainRAM.Reset()
-		via1.Reset()
-		scopeProv.Reset()
+		// Drained on the Pump goroutine so the peripheral resets
+		// don't race with an in-flight CPU slice.
+		sharedHub.IssueCommand(func(_ *bridge.Pump) {
+			dispCtrl.Reset()
+			mainRAM.Reset()
+			via1.Reset()
+			scopeProv.Reset()
+		})
+		// CPU + driver shallow-reset (also on the Pump goroutine).
+		sharedHub.CmdReset()
+		// Repaint is a UI op — fine to call from the caller's thread.
 		paintInitialDisplay()
-		clockProv.Reset()
 	}
-	cpuProv.OnReset = machineReset
 
 	dispProv := &displaywin.Provider{
 		// inner bus so the window's own hex-dump reads don't pollute
@@ -406,8 +497,8 @@ func main() {
 	// loop) only see flag transitions at app.Tick boundaries — so a
 	// large CPU batch can spend the whole batch in a wait loop, never
 	// observing the VIA timer underflow that's about to come.
-	const subTicks = 10
-	subPeriod := tickPeriod / subTicks
+	// (subTicks / subPeriod removed: the Hub Pump owns the
+	// sub-cycle slicing now; app.Tick no longer drives the CPU.)
 
 	// Auto-tune the scope's sampling stride to the current CPU
 	// speed. At low Hz we capture every half-cycle (100%); at
@@ -438,31 +529,39 @@ func main() {
 	// T1C_H, so T1 arms straight into free-run.
 	app.Tick(tickPeriod, func() {
 		scopeProv.Decimate = scopeDecimate()
-		for i := 0; i < subTicks; i++ {
-			// inst.Advance == drv.Advance + bp.Tick, in lockstep —
-			// the exact pairing this loop used to hand-duplicate.
-			inst.Advance(subPeriod)
-		}
+		// CPU + peripheral driving lives entirely on the Hub Pump
+		// (see sharedHub above). This tick is now just for UI
+		// state that the foxpro draw loop needs nudged on a steady
+		// cadence (scope decimation). The Hub heartbeats peripherals
+		// while idle, so the 1 MHz crystal still runs even when the
+		// CPU is paused / stepping.
 	})
 
-	// Global key bindings. Active in any focused window so the user
-	// can drive the simulator without first focusing the Clock window.
+	// Global key bindings. Active in any focused window EXCEPT
+	// Monitor — when the Monitor's REPL is focused, runes flow to
+	// its input editor (typing `reset` shouldn't fire 4 hotkeys).
 	app.OnKey = func(ev *tcell.EventKey) bool {
 		if ev.Key() != tcell.KeyRune {
 			return false
 		}
+		if app.Manager.Active() == monitorWin {
+			return false
+		}
+		// Clock-affecting keys route through the Hub — same path the
+		// bridge controller uses, so TUI and remote co-exist as
+		// co-equal commanders. No lockout needed.
 		switch ev.Rune() {
 		case 'r', 'R':
-			clockProv.SetRunning(true)
+			sharedHub.CmdRun(0, 0)
 			return true
 		case '.':
-			clockProv.SetRunning(false)
+			sharedHub.CmdStop()
 			return true
 		case 's', 'S':
-			clockProv.StepInstruction()
+			sharedHub.CmdStep("instruction", 1)
 			return true
 		case 't', 'T':
-			clockProv.StepOne()
+			sharedHub.CmdStep("halfcycle", 1)
 			return true
 		case 'z', 'Z':
 			machineReset()
@@ -595,10 +694,10 @@ func main() {
 		{
 			Label: "&Run",
 			Items: []foxpro.MenuItem{
-				{Label: "R&un", Hotkey: "R", OnSelect: func() { clockProv.SetRunning(true) }},
-				{Label: "S&top", Hotkey: ".", OnSelect: func() { clockProv.SetRunning(false) }},
-				{Label: "&Step instruction", Hotkey: "S", OnSelect: clockProv.StepInstruction},
-				{Label: "&Tick (½ cycle)", Hotkey: "T", OnSelect: clockProv.StepOne},
+				{Label: "R&un", Hotkey: "R", OnSelect: func() { sharedHub.CmdRun(0, 0) }},
+				{Label: "S&top", Hotkey: ".", OnSelect: func() { sharedHub.CmdStop() }},
+				{Label: "&Step instruction", Hotkey: "S", OnSelect: func() { sharedHub.CmdStep("instruction", 1) }},
+				{Label: "&Tick (½ cycle)", Hotkey: "T", OnSelect: func() { sharedHub.CmdStep("halfcycle", 1) }},
 			},
 		},
 		{
@@ -619,9 +718,29 @@ func main() {
 			Items: []foxpro.MenuItem{
 				{Label: "&Command", Hotkey: "Ctrl+F2", OnSelect: app.ToggleCommandWindow},
 				{Label: "C&ycle", Hotkey: "F6", OnSelect: app.Manager.FocusNext},
+				{Separator: true},
+				{Label: "Toggle &Monitor", OnSelect: func() {
+					if app.Manager.Contains(monitorWin) {
+						app.Manager.Remove(monitorWin)
+					} else {
+						app.Manager.Add(monitorWin)
+						app.Manager.Raise(monitorWin)
+					}
+				}},
 			},
 		},
 	})
+
+	// Plumb the SimHost's quit + help-window hooks now that app
+	// is fully constructed. The Monitor's `q` / `quit` and `help
+	// window` commands route through these closures.
+	simHost.quit = app.Quit
+	simHost.helpOpener = func() {
+		hw := foxpro.NewWindow("Help — Monitor",
+			foxpro.Rect{X: 6, Y: 2, W: 70, H: 32},
+			foxpro.NewTextProvider(monitor.HelpTable))
+		app.Manager.Add(hw)
+	}
 
 	// Live tray — top-right of the menu bar. Three cells, each
 	// clickable: speed (opens picker), running/stopped (toggles),
@@ -681,7 +800,7 @@ func main() {
 	}
 
 	if *runFlag {
-		clockProv.SetRunning(true)
+		sharedHub.CmdRun(0, 0)
 	}
 
 	app.Run()

@@ -16,3 +16,9 @@
 # dir, but ignore here too so a stray in-repo one is never committed).
 go.work
 go.work.sum
+
+# Defensive ignores: this is a Go repo, but sibling Node/Astro projects
+# (thecarledwards-site) sometimes leak their build caches in here if a
+# build command runs from the wrong cwd. Never commit them.
+/.astro/
+/node_modules/

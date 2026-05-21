@@ -38,7 +38,8 @@ const (
 	colorBase = 0xA000 // VIC color plane
 	charBase  = 0xA400 // VIC char plane
 	ctrlBase  = 0xA800 // VIC controller registers
-	viaBase   = 0xB000 // 6522 VIA #1
+	viaBase   = 0xB000 // 6522 VIA #1 (all presets)
+	via2Base  = 0xB100 // 6522 VIA #2 (TeachMerlin only)
 	romBase   = 0xE000
 	romSize   = 0x2000 // $E000-$FFFF, covers the $FFFA vector block
 	dispW     = 40
@@ -108,6 +109,35 @@ func TeachMin() *Machine {
 	must(bp.Attach(ram.New("ram", ramBase, ramSize)))
 	must(bp.Attach(ram.New("framebuffer", colorBase, 0x1000))) // $A000-$AFFF
 	must(bp.Attach(via.New("via1", viaBase, 1_000_000)))
+	must(bp.Attach(r))
+
+	backend := interp.New(bp)
+	backend.Reset()
+	drv := clock.NewDriver(backend)
+	return &Machine{BP: bp, Drv: drv, Inst: instrument.New(bp, drv), rom: r}
+}
+
+// TeachMerlin composes the multi-VIA learn machine: main RAM, two
+// 1 MHz 6522 VIAs (one at $B000, one at $B100 — convention is "VIA #1
+// for inputs, VIA #2 for outputs," but the assembler doesn't care which
+// way around you use them), ROM, interp CPU. No framebuffer region — a
+// Merlin-class app uses the VIA pins themselves as input (keypad scan)
+// and output (LEDs / piezo), so there's no need for a bitmap surface.
+//
+// This is also the first preset that puts *two of the same card type*
+// on the bus. Each VIA is a full 6522 — independent T1/T2 timers,
+// IFR/IER, ORA/ORB. Their IRQ pins fan into the same CPU IRQ pin via
+// the backplane's wired-OR (bus.IRQSource), so an ISR sees one IRQ and
+// decides which VIA fired by polling each card's IFR. Taps are
+// namespaced (`via1.t1`, `via2.t1`, `via1.irq`, `via2.irq`) so a debugger
+// or break-on-tap can target a specific chip.
+func TeachMerlin() *Machine {
+	bp := backplane.New()
+	r := rom.New("rom", romBase, romSize)
+
+	must(bp.Attach(ram.New("ram", ramBase, ramSize)))
+	must(bp.Attach(via.New("via1", viaBase, 1_000_000)))
+	must(bp.Attach(via.New("via2", via2Base, 1_000_000)))
 	must(bp.Attach(r))
 
 	backend := interp.New(bp)

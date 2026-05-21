@@ -89,6 +89,53 @@ Goal: visible single-stepping of the netsim core.
 - [ ] Settings persistence (window layout, last ROM, theme)
 - [ ] Demo programs in `examples/`
 
+## Phase 8 — Bridge protocol + Monitor REPL ✓
+
+Goal: same simulator, multiple drivers — local TUI, remote
+controller, in-process REPL, future MCP / VS Code consumer. One
+protocol vocabulary; one Monitor implementation.
+
+- [x] `bridge.Hub` + Pump architecture — single CPU-driver goroutine
+      with sub-cycle slicing, lockstep `inst.RunUntil` + `bus.Tick`
+- [x] Pump pacing — paced (configurable Hz) or unpaced (Max mode);
+      Stop / Step align PC to next SYNC boundary
+- [x] NDJSON/TCP transport — `cmd/6502-sim-serve` (per-session Hub),
+      `cmd/6502-sim --serve` (shared Hub for TUI + remote clients)
+- [x] `bridge.Target` Go interface — protocol surface as a contract
+- [x] `*bridgeclient.Client` (wire) + `*bridge.HubDirect` (in-process)
+      both satisfy `Target`
+- [x] Monitor REPL extracted to `internal/monitor` — host-agnostic;
+      consumed by three edges
+- [x] `cmd/6502-control` — hand-driven controller TUI with healing
+      auto-reconnect (atomic.Pointer client swap + backoff)
+- [x] Monitor wired into `cmd/6502-sim` and `cmd/6502-wasm` via
+      `HubDirect` — same REPL, three transports
+- [x] Wasm Hub-driven execution + Max-mode JS-event-loop yield so
+      the browser tab keeps painting at full speed
+- [x] Host-driven IRQ + NMI injection (`cpu.irq` / `cpu.nmi`,
+      interp services; netsim NMI awaits upstream `SetNMI`)
+- [x] PC override (`cpu.setPC` via `cpu.PCSetter` capability)
+- [x] Stack dump with return-address guess overlay (`stack r`)
+- [x] Latching stack-depth warnings (80% / 90% / overflow)
+- [x] VIA subcommand tree — `via list` / `via dump [name|addr]` /
+      `via set` with per-bit + whole-port forms, multi-VIA
+      disambiguation, strict DDR check on output writes
+- [x] Persistent help window (`help window`) + grouped inline help
+- [x] Bridge protocol doc updated (`docs/bridge-v2.md`)
+
+Remaining for Phase 8:
+
+- [ ] `tap.changed` topic emission (subscription accepted; emission
+      pending Phase B per bridge-v2.md)
+- [ ] `irq.taken` topic emission
+- [ ] Multi-VIA window auto-derived from regions (teach-merlin
+      readiness in the TUIs)
+- [ ] Lift `simhost.go` into `internal/simhost` (currently
+      duplicated between cmd/6502-sim + cmd/6502-wasm)
+- [ ] MCP server consumer
+- [ ] VS Code extension consumer
+- [ ] Mobile (iPhone) touch events on the wasm canvas
+
 ## Out of scope (for now)
 
 - Cartridge / mapper emulation

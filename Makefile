@@ -88,10 +88,13 @@ codelab: codelab-wasm
 	@echo "open http://localhost:$(PORT)/codelab.html"
 	@cd $(WEB) && python3 -m http.server $(PORT)
 
-# wasm-serve — local static server on PORT (default 8765). Use after
-# `make wasm`. Open http://localhost:$(PORT)/ once it starts.
-wasm-serve:
-	@echo "serving $(WEB)/ at http://localhost:$(PORT)/"
+# wasm-serve — rebuild then local static server on PORT (default 8765).
+# Depends on `wasm` so a one-step `make wasm-serve` always serves the
+# latest binary. Open http://localhost:$(PORT)/ once it starts and
+# HARD-REFRESH the browser (Cmd-Shift-R / Ctrl-Shift-R) to dodge the
+# .wasm cache that otherwise loads stale builds.
+wasm-serve: wasm
+	@echo "serving $(WEB)/ at http://localhost:$(PORT)/  (hard-refresh the browser)"
 	@cd $(WEB) && python3 -m http.server $(PORT)
 
 tidy:

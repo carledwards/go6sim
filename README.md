@@ -76,6 +76,45 @@ Bundle size: ~5.3 MB raw, ~1.4 MB gzipped. Standard static-host MIME
 config (`application/wasm`) is enough — no cross-origin headers
 required.
 
+## Bridge protocol + Monitor REPL
+
+Beyond the on-screen widgets, the simulator exposes a debugger
+protocol — JSON-RPC 2.0 over NDJSON/TCP for remote drivers, or as
+direct Go calls in-process. Both share one Go interface
+(`bridge.Target`), so the same Monitor REPL drives every edge:
+
+| Edge | Command | How it talks to the sim |
+|---|---|---|
+| Built-in Monitor (terminal) | `cmd/6502-sim` (Window → Toggle Monitor) | in-process via `bridge.HubDirect` |
+| Built-in Monitor (browser) | `cmd/6502-wasm` (Monitor visible by default) | in-process via `bridge.HubDirect` |
+| Headless bridge server | `cmd/6502-sim-serve` | listens on `:6502`, NDJSON/TCP |
+| Shared-bridge TUI | `cmd/6502-sim --serve` | TUI runs locally + accepts remote bridge clients |
+| Remote controller TUI | `cmd/6502-control` | dials a bridge server, healing reconnect |
+| **Future** | MCP server, VS Code extension, etc. | implement `bridge.Target` |
+
+The Monitor itself lives in `internal/monitor`. Its command set:
+
+| Group | Verbs |
+|---|---|
+| CPU & run | `r` regs · `g [addr]` run · `s [n]` step · `.` stop · `reset` · `stack [r]` |
+| Memory | `m [addr] [n]` hex · `d [addr] [n]` disasm · `: <addr> <b>…` poke · `f <s> <e> <b>` fill · `t <s> <d> <n>` transfer · `h <s> <e> <b>…` hunt |
+| Breakpoints | `bp <addr>` · `bc [id\|all]` · `bl` |
+| Interrupts | `irq` · `nmi` |
+| Hardware | `hw` / `info` · `via <sub>` (list/dump/set) |
+| Monitor | `cls` · `help [cmd]` · `help window` · `reconnect` · `q` |
+
+Addresses are hex (`$E000` / `0xE000` / `E000`) or **symbolic**:
+`pc`, `sp`, `reset`, `irq`, `nmi`. The symbolic forms read live —
+`d pc` disassembles wherever you currently are; `m irq` dumps the
+IRQ handler the CPU would jump to right now.
+
+The remote controller auto-reconnects with backoff if the sim
+restarts. CPU state preservation across reconnect depends on which
+loader: `cmd/6502-sim --serve` keeps the live Hub across reconnects;
+`cmd/6502-sim-serve`'s per-session Hub is fresh on each reconnect.
+
+The protocol contract lives in [`docs/bridge-v2.md`](docs/bridge-v2.md).
+
 ### CLI flags (terminal build only)
 
 | Flag           | Default   | Notes                                                 |
@@ -161,26 +200,35 @@ Every component gets its own floating, draggable window. Click in the
 title bar to drag, click the corner to resize.
 
 - **CPU** — A/X/Y/S/PC, P flags, half-cycle counter, live address bus,
-  data bus, R/W direction, IRQ/NMI line states. Reset button.
-- **Memory** — hex view + ASCII column with editable base address
-  (click the `$XXXX:` button, type 4 hex digits). Trace tinting:
-  yellow = write that *changed* the byte, brown = write that left it
-  unchanged, green = read. `v` cycles Hex / Disasm / Labels — Labels
-  shows declared symbols within the current region (or a per-byte
-  fallback view for regions without symbols). The disasm column
-  substitutes operand addresses with symbol names where known and
-  appends per-instruction comments.
-- **VIC** — 40 × 13 framebuffer with 16-color palette, plus a 160 × 100
-  graphics plane (when in graphics mode). Right column has buttons
-  for every controller command. Below the framebuffer, a scrollable
-  hex strip shows the VIC's controller region.
-- **VIA #1** — live snapshot of the chip's state: T1 counter / latch /
-  mode / armed flag, ACR decoded, IFR + IER bit dots (● set, . clear),
-  ports / SR / PCR. The counter ticks down even when the CPU is
-  paused or stepping, because the VIA's crystal runs independently.
-  When T1 hasn't been armed yet, the window says so.
-- **Clock** — current rate, target, batch size. Run / Stop / Step /
-  Tick controls and a speed selector.
+  data bus, R/W direction, IRQ/NMI line states.
+- **RAM** / **ROM** (Memory views) — hex view + ASCII column with
+  editable base address (click the `$XXXX:` button, type 4 hex
+  digits). Trace tinting: yellow = write that *changed* the byte,
+  brown = write that left it unchanged, green = read. `v` cycles
+  Hex / Disasm / Labels — Labels shows declared symbols within the
+  current region (or a per-byte fallback view for regions without
+  symbols). The disasm column substitutes operand addresses with
+  symbol names where known and appends per-instruction comments.
+- **VIC / Video** — 40 × 13 framebuffer with 16-color palette, plus a
+  160 × 100 graphics plane (when in graphics mode). Right column has
+  buttons for every controller command. Below the framebuffer, a
+  scrollable hex strip shows the VIC's controller region.
+- **VIA 1** — live snapshot of the chip's state: ports + DDRs at the
+  top, then Timer 1 (counter / latch / mode / armed flag), then ACR
+  decoded + IFR + IER bit dots (● set, . clear). The chip's base
+  address + crystal speed live in the title bar. The counter ticks
+  down even when the CPU is paused or stepping, because the VIA's
+  crystal runs independently.
+- **Monitor** — the shared REPL described above. Toggleable from
+  the Window menu in the terminal build; visible on startup in the
+  browser build. Common pane across all three apps.
+- **Logic Analyzer** (scope) — hidden by default; toggleable. 256
+  cycles of bus-trace history with auto-tuned sampling stride.
+
+Run/Stop/Step + speed controls live on the menu bar's right-side
+tray (clickable). The Clock window was removed when the bridge
+landed — every action is in the menu, keyboard hotkeys, or the
+Monitor's command line.
 
 ## Demos
 
@@ -235,40 +283,60 @@ In the VIC window's hex strip:
 
 ## Architecture
 
-Single-threaded. `App.Tick` (50 ms) drives both UI redraws and the
-simulator advance — no goroutines, no locks. The run loop sub-divides
-each tick into 10 slices and interleaves CPU advancement with
-`bus.Tick(dt)`, so polling-based demos (those that LDA/AND/BEQ a
-peripheral flag in a tight wait loop) observe timer underflows
-multiple times per app.Tick instead of just once. The clock provider
-calls `Backend.HalfStep` in batches sized to fit the per-tick budget;
-auto-tune calibrates the batch size at startup.
+The execution model has two goroutines: the **foxpro UI thread**
+(handles input, draws windows) and the **Hub Pump** (drives the CPU
++ peripherals in slices, synchronously). They serialise through a
+single mutex — concurrent reads from the UI side take a query lock;
+the Pump holds it during each slice. Same model native + wasm.
+In wasm, the Pump yields to the JS event loop every ~10 ms in Max
+mode so the browser tab can render.
+
+The Pump slices each "tick" into 200-half-cycle chunks and pairs
+each `RunUntil` with a `bus.Tick(virtualDt)` for peripherals — so
+polling-based demos (those that LDA/AND/BEQ a peripheral flag in a
+tight wait loop) observe timer underflows multiple times per app
+frame instead of just once. The driver auto-tunes per-tick batch
+size at startup to fit the host's tick budget.
 
 Components self-describe their register layouts via the optional
 `bus.Labeller` interface (`Symbols() []asm.Symbol`), so the Memory
 window's Labels view annotates the VIC and VIA register regions
 automatically — no hand-maintained mapping. Time-driven peripherals
-implement `bus.Ticker` and get fanned out automatically per sub-tick.
+implement `bus.Ticker` and get fanned out automatically.
 
-Read `docs/architecture.md` for layering, interfaces, and component
-contracts. `docs/roadmap.md` tracks remaining work.
+The **bridge protocol** is a separate layer above the Hub. Clients
+(remote `cmd/6502-control`, in-process Monitor in `cmd/6502-sim` /
+`cmd/6502-wasm`, future MCP / VS Code) implement / consume the
+`bridge.Target` interface; the transport (TCP NDJSON or direct Go
+calls via `bridge.HubDirect`) is the only thing that differs.
+
+Read `docs/architecture.md` for layering + component contracts,
+`docs/bridge-v2.md` for the protocol surface, and `docs/roadmap.md`
+for remaining work.
 
 ## Project layout
 
 ```
-cmd/6502-sim/        terminal entry — main wiring, flags, profiling
-cmd/6502-wasm/       browser entry — wasm-tagged, uses foxpro-go's wasm bridge
-asm/                 fluent 6502 assembler used by demos
-internal/demos/      shared demo programs (text + graphics)
-bus/                 Bus, Component, Ticker, Labeller, TraceBus
-cpu/                 Backend interface
-cpu/netsim/          netsim adapter
-cpu/interp/          interpretive 151-opcode 6502
-components/          ram, rom, display, via
-disasm/              151-opcode disassembler with cycle counts and effects
-ui/                  cpuwin, ramwin, displaywin, clockwin, viawin
-web/                 static frontend served by the wasm build (built artifacts)
-docs/                architecture, roadmap
+cmd/6502-sim/         terminal entry — main wiring, flags, profiling
+cmd/6502-sim-serve/   headless bridge server (no UI, listens on :6502)
+cmd/6502-control/     remote controller TUI — bridge client over NDJSON/TCP
+cmd/6502-wasm/        browser entry — wasm-tagged, uses foxpro-go's wasm bridge
+asm/                  fluent 6502 assembler used by demos
+backplane/            machine bus + interrupt aggregation + reset capability
+bridge/               protocol layer — Hub + Pump + Target interface + HubDirect
+clock/                Driver, Speeds, halfStep accumulator
+cpu/                  Backend interface + PCSetter capability
+cpu/netsim/           netsim adapter
+cpu/interp/           interpretive 151-opcode 6502 (with IRQ/NMI service paths)
+components/           ram, rom, display, via
+disasm/               151-opcode disassembler with cycle counts and effects
+instrument/           Instrument facade — wraps backplane + driver
+internal/bridgeclient/ Go wire client for the bridge protocol
+internal/monitor/     shared Monitor REPL — drives any bridge.Target
+internal/demos/       shared demo programs (text + graphics)
+ui/                   cpuwin, ramwin, displaywin, viawin, scopewin, clockwin
+web/                  static frontend served by the wasm build (built artifacts)
+docs/                 architecture, bridge protocol, roadmap, systems
 ```
 
 ## Status

@@ -55,6 +55,19 @@ type RunResult struct {
 	Addr       uint16
 }
 
+// Tick advances peripheral virtual time by dt, delegating to the
+// backplane. Useful for callers that drive the CPU via RunUntil (which
+// is CPU-only, by design — see its godoc) and need to keep peripherals
+// synchronised. The standard pairing in a manual driver loop is:
+//
+//	r := inst.RunUntil(slice)
+//	inst.Tick(virtualDuration(r.HalfCycles, speedHz))
+//
+// The TUI's tick path uses inst.Advance(dt), which does both in
+// lockstep for callers that don't care about per-half-step bp/vector
+// stops.
+func (i *Instrument) Tick(dt time.Duration) { i.bp.Tick(dt) }
+
 // SetBreakpoint arms an instruction-address breakpoint.
 func (i *Instrument) SetBreakpoint(addr uint16) { i.bps[addr] = true }
 
@@ -135,17 +148,69 @@ func (i *Instrument) Reset() {
 
 // Step advances n whole instructions. No-op while running — the clock
 // owns execution then. (Debugger `s`; lesson single-stepping.)
+//
+// Peripherals are ticked proportionally to half-cycles consumed by
+// each instruction. Without this, the VIA's T1 timer, the display
+// controller, and other Ticker cards see zero virtual time during a
+// step — programs that wait on IRQs (timer-driven video updates,
+// keypress polling) stall and the user observes "I stepped 100 but
+// nothing happened on screen."
 func (i *Instrument) Step(n int) {
 	for k := 0; k < n; k++ {
+		before := i.drv.Backend.HalfCycles()
 		i.drv.StepInstruction()
+		i.tickPeripherals(i.drv.Backend.HalfCycles() - before)
+	}
+}
+
+// FinishInstruction advances the CPU through the rest of any
+// in-flight instruction so PC lands on a clean SYNC boundary. No-op
+// when SYNC is already true (the case for breakpoint halts, which
+// trigger AT a SYNC). Bounded by the same 32-half-cycle ceiling
+// StepInstruction uses, so a pathological backend can't lock the
+// caller.
+//
+// Used by Hub.CmdStop after free-run halts: without this, the next
+// user step from PC=mid-instruction only completes the in-flight
+// fetch/execute, so the user perceives "I had to step twice."
+func (i *Instrument) FinishInstruction() {
+	be := i.drv.Backend
+	if be.SYNC() {
+		return
+	}
+	for n := 0; n < 32; n++ {
+		i.drv.StepOne()
+		if be.SYNC() {
+			return
+		}
 	}
 }
 
 // StepCycle advances n half-cycles. (Debugger `t`; cycle-level lessons.)
+// Peripherals tick proportionally — same rationale as Step.
 func (i *Instrument) StepCycle(n int) {
 	for k := 0; k < n; k++ {
+		before := i.drv.Backend.HalfCycles()
 		i.drv.StepOne()
+		i.tickPeripherals(i.drv.Backend.HalfCycles() - before)
 	}
+}
+
+// tickPeripherals translates the given half-cycle count into virtual
+// wall-clock time (at the driver's configured Hz, defaulting to
+// 1 MHz when unpaced) and ticks the backplane's Ticker cards. Used
+// by Step / StepCycle so peripherals don't freeze during debugger
+// single-stepping.
+func (i *Instrument) tickPeripherals(halves uint64) {
+	if halves == 0 {
+		return
+	}
+	hz := i.drv.Speed().Hz
+	if hz <= 0 {
+		hz = 1_000_000
+	}
+	dt := time.Duration(halves) * time.Second / time.Duration(2*hz)
+	i.bp.Tick(dt)
 }
 
 // SetRunning starts/stops free-run. Run-loop drivers then call Advance.
@@ -159,6 +224,13 @@ func (i *Instrument) Running() bool { return i.drv.Running() }
 // is the primary surface; this is the deliberate escape hatch for clock
 // tuning, mirroring backplane's Trace() hatch.
 func (i *Instrument) Driver() *clock.Driver { return i.drv }
+
+// Backplane returns the underlying *backplane.Backplane so callers
+// driving the system from outside (Hub.CmdIRQ for the debugger
+// console line, future host-NMI plumbing) can reach the capability
+// surface without piercing every layer. Like Driver, this is an
+// intentional escape hatch — most code should stay above it.
+func (i *Instrument) Backplane() *backplane.Backplane { return i.bp }
 
 // Advance is the budget-tick clock driver (resolved open-question #1):
 // it steps the CPU for the window AND ticks the bus/peripherals by the
