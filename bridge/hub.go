@@ -264,6 +264,13 @@ type Pump struct {
 	// the line must drop after one service or the next pulse won't
 	// be observable.
 	hostNMIClear bool
+
+	// lastYield tracks the most-recent time the Pump explicitly
+	// handed control back to the host runtime. Only consulted in
+	// wasm (see yield_wasm.go) where the Pump's busy slice loop
+	// would otherwise starve the JS event loop; on native the
+	// field is set but never read.
+	lastYield time.Time
 }
 
 const stateSnapshotInterval = 100 * time.Millisecond
@@ -443,6 +450,15 @@ func (h *Hub) Run(ctx context.Context) {
 					return
 				}
 			}
+		} else {
+			// Max-mode (no pacing) yield. On native Go this is a
+			// no-op — preemptive scheduling keeps other goroutines
+			// fed regardless. On wasm the helper checks how long
+			// since the last yield and only sleeps when due (every
+			// ~10 ms wall clock), so the Pump batches many slices
+			// between yields. Avoids the "yield every slice" trap
+			// that capped wasm throughput at ~75 kHz halves.
+			yieldMaxMode(p)
 		}
 	}
 }

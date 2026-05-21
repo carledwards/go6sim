@@ -172,6 +172,57 @@ Wire envelope is identical to v1 — JSON-RPC `{jsonrpc, id, method,
 params}` for requests, `{result | error}` for responses, no-id
 for notifications.
 
+## 5a. Go interface — `bridge.Target`
+
+For in-process consumers (the TUI's built-in Monitor, integration
+tests, the future MCP shim) the protocol is also expressed as a Go
+interface so the same consumer code drives both transports:
+
+```go
+// package bridge
+type Target interface {
+    // Queries
+    CPUState() (CPUState, *Error)
+    MemPeek(addr uint16, n int) ([]byte, *Error)
+    BPList() (BPListResult, *Error)
+
+    // Commands (synchronous ack)
+    MemPoke(addr uint16, b []byte) (int, *Error)
+    Step(n int) (ClockStepResult, *Error)
+    Run(speedHz int) *Error
+    Stop() (ClockStopResult, *Error)
+    Reset() (CPUState, *Error)
+    SetPC(pc uint16) (CPUState, *Error)
+    BPSet(addr uint16) (BPSetResult, *Error)
+    BPClear(id string) (BPClearResult, *Error)
+    IRQ() *Error
+    NMI() *Error
+
+    // Escape hatch
+    Call(method string, params any) (json.RawMessage, *Error)
+
+    // Events
+    Notifications() <-chan Notification
+}
+```
+
+Two implementations ship:
+
+| Implementation | Transport | Use case |
+|---|---|---|
+| `*bridgeclient.Client` | NDJSON over TCP | remote drivers (`cmd/6502-control`, MCP later, VS Code later) |
+| `*bridge.HubDirect` | direct Go calls | in-process Monitor (`cmd/6502-sim`, `cmd/6502-wasm`) |
+
+`HubDirect` wraps a `*bridge.Hub` and subscribes to the Hub's event
+topics, marshaling payloads to `json.RawMessage` so the
+`Notification` shape matches the wire. Consumers cast the params
+once and don't know which transport they're on.
+
+Compile-time `var _ Target = (*Foo)(nil)` assertions in each
+implementation file ensure new methods added to `Target` break the
+build until each consumer grows the matching method — that's the
+discipline this interface exists to enforce.
+
 ## 6. Lifecycle
 
 ```

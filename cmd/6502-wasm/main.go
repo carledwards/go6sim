@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 
 	"github.com/carledwards/go6sim/asm"
 	"github.com/carledwards/go6sim/backplane"
+	"github.com/carledwards/go6sim/bridge"
 	"github.com/carledwards/go6sim/bus"
 	"github.com/carledwards/go6sim/clock"
 	"github.com/carledwards/go6sim/components/display"
@@ -38,6 +40,7 @@ import (
 	"github.com/carledwards/go6sim/cpu/netsim"
 	"github.com/carledwards/go6sim/instrument"
 	"github.com/carledwards/go6sim/internal/demos"
+	"github.com/carledwards/go6sim/internal/monitor"
 	"github.com/carledwards/go6sim/ui/clockwin"
 	"github.com/carledwards/go6sim/ui/cpuwin"
 	"github.com/carledwards/go6sim/ui/displaywin"
@@ -180,13 +183,18 @@ func main() {
 	backend.Reset()
 	cpuTitle := fmt.Sprintf("CPU (%s)", currentCPU)
 
-	// SimulationScreen sized to fit every window plus menu+status rows.
-	// 140×32 covers the widest layout (display window ends at col 136).
+	// SimulationScreen size — 160×40 gives the Monitor pane room to
+	// sit alongside the existing windows without overlapping. The
+	// widest pre-existing window (Display at col 60, W=77) still
+	// ends at col 136, leaving 23 cols of headroom on the right and
+	// 9 rows of headroom on the bottom for Monitor + future widgets.
+	// Mobile: the page's CSS scales the canvas to fit the viewport
+	// — the wasm side stays 160×40 logically.
 	s := tcell.NewSimulationScreen("UTF-8")
 	if err := s.Init(); err != nil {
 		panic(err)
 	}
-	s.SetSize(140, 32)
+	s.SetSize(160, 40)
 	s.EnableMouse()
 
 	app := foxpro.NewAppWithScreen(s)
@@ -241,7 +249,7 @@ func main() {
 
 	cpuProv := &cpuwin.Provider{Backend: backend}
 	cpuWindow := addWindow(cpuTitle,
-		foxpro.Rect{X: 2, Y: 1, W: 38, H: 11},
+		foxpro.Rect{X: 0, Y: 1, W: 44, H: 11},
 		cpuProv,
 		cpuwin.MinW, cpuwin.MinH)
 
@@ -256,8 +264,8 @@ func main() {
 		Symbols:      mergeSymbols(bootDemo.Symbols),
 		Annotations:  bootDemo.Annotations,
 	}
-	memWin := addWindow("Memory",
-		foxpro.Rect{X: 42, Y: 1, W: 76, H: 14},
+	memWin := addWindow("Memory ($0000)",
+		foxpro.Rect{X: 0, Y: 12, W: 78, H: 18},
 		ramProv,
 		ramwin.MinW, ramwin.MinH)
 	ramProv.Window = memWin
@@ -274,28 +282,72 @@ func main() {
 		Symbols:      mergeSymbols(bootDemo.Symbols),
 		Annotations:  bootDemo.Annotations,
 	}
-	romWin := addWindow("Memory",
-		foxpro.Rect{X: 42, Y: 16, W: 76, H: 8},
+	romWin := addWindow("Memory · disasm ($E000 - $FFFF)",
+		foxpro.Rect{X: 0, Y: 30, W: 120, H: 10},
 		romProv,
 		ramwin.MinW, ramwin.MinH)
 	romProv.Window = romWin
 
 	// One shared clock driver: the clock window renders it, the
-	// instrument (run loop) drives it. TUI is now an instrument client.
+	// instrument is its facade. CPU drive lives on the Hub Pump
+	// below; the driver carries speed / OnHalfStep / MaxBatch only.
 	drv := clock.NewDriver(backend)
 	clockProv := clockwin.NewProviderWithDriver(drv)
 	inst := instrument.New(bp, drv)
-	addWindow("Clock",
-		foxpro.Rect{X: 2, Y: 13, W: 38, H: 7},
-		clockProv,
-		clockwin.MinW, clockwin.MinH)
+	// Clock window omitted — same as the native sim TUI. The tray
+	// indicator (top-right of the menu bar) shows running/stopped +
+	// current Hz and is clickable; Run / Hardware menus + R/S/T/Z
+	// hotkeys cover every action. clockProv stays alive as the
+	// speed/MaxBatch/OnHalfStep holder.
+
+	// Hub-driven execution — same pattern as cmd/6502-sim. CPU +
+	// peripheral driving lives entirely on the Pump goroutine; the
+	// app.Tick callback below no longer calls inst.Advance. Lets us
+	// expose a bridge.HubDirect so the in-process Monitor can talk
+	// to the same vocabulary the wire-client Monitor uses.
+	wasmRegions := []bridge.Region{
+		{Name: "ram", Lo: ramBase, Hi: ramBase + ramSize - 1, ReadOnly: false},
+		{Name: "color", Lo: colorBase, Hi: charBase - 1, ReadOnly: false},
+		{Name: "char", Lo: charBase, Hi: ctrlBase - 1, ReadOnly: false},
+		{Name: "video", Lo: ctrlBase, Hi: ctrlBase + 0x0F, ReadOnly: false},
+		{Name: "via1", Lo: viaBase, Hi: viaBase + 0x0F, ReadOnly: false},
+		{Name: "gfx", Lo: gfxBase, Hi: gfxBase + 0x1FFF, ReadOnly: false},
+		{Name: "rom", Lo: romBase, Hi: romBase + romSize - 1, ReadOnly: true},
+	}
+	sharedHub := bridge.NewHub(inst, wasmRegions, "sim-wasm")
+	hubCtx, cancelHub := context.WithCancel(context.Background())
+	go sharedHub.Run(hubCtx)
+	defer cancelHub()
 
 	viaProv := &viawin.Provider{VIA: via1, Base: viaBase}
 	viaTitle := fmt.Sprintf("VIA 1 — $%04X @ %s", viaBase, viawin.FormatHz(via1.CrystalHz()))
-	addWindow(viaTitle,
-		foxpro.Rect{X: 2, Y: 13, W: 56, H: 18},
+	viaWin := addWindow(viaTitle,
+		foxpro.Rect{X: 44, Y: 1, W: 56, H: 16},
 		viaProv,
 		viawin.MinW, viawin.MinH)
+
+	// Monitor — same shared REPL as cmd/6502-control + cmd/6502-sim.
+	// HubDirect plugs the wasm sim's Hub straight into the Target
+	// interface without TCP. Hidden by default; toggleable from the
+	// Window menu — wasm screen real estate is precious.
+	simHost := newSimHost(
+		"Sim WASM (shared)",
+		"the browser TUI's live machine — in-process via HubDirect",
+		wasmRegions,
+	)
+	hubDirect := bridge.NewHubDirect(sharedHub)
+	mon := monitor.New(simHost, hubDirect)
+	monitorWin := addWindow("Monitor",
+		foxpro.Rect{X: 78, Y: 23, W: 82, H: 15},
+		mon,
+		20, 5)
+	// Monitor is visible on startup in the wasm build — the
+	// browser landing experience benefits from the REPL being
+	// discoverable without a menu hunt. Users can close via the
+	// chrome's X (or the Window menu's toggle).
+	mon.AddEvent("system", "Monitor opened (in-process target)")
+	mon.AddEvent("system", "type 'help' or '?' for commands")
+	go consumeHubDirectNotifications(hubDirect, mon)
 
 	// Logic-analyzer scope: 256 cycles of trace history. Hidden by
 	// default — shown when the user enables it from the Window menu.
@@ -382,10 +434,22 @@ func main() {
 	}
 	dispTitle := fmt.Sprintf("Video $%04X-$%04X", colorBase, ctrlBase+8)
 	dispWindow := addWindow(dispTitle,
-		foxpro.Rect{X: 60, Y: 1, W: 77, H: 22},
+		foxpro.Rect{X: 100, Y: 1, W: 60, H: 22},
 		dispProv,
 		displaywin.MinW, displaywin.MinH)
 	dispProv.Window = dispWindow // lets Provider append [TEXT]/[GFX] to the title each Draw
+
+	// Z-order: addWindow accumulates in code order, but the desired
+	// stack (back-to-front) is RAM → CPU → VIA → Video → Monitor → ROM
+	// so overlapping rectangles draw correctly. Raise each in that
+	// order; each Raise brings the named window to the top of the
+	// current stack, so the LAST Raise wins the front.
+	app.Manager.Raise(memWin)
+	app.Manager.Raise(cpuWindow)
+	app.Manager.Raise(viaWin)
+	app.Manager.Raise(dispWindow)
+	app.Manager.Raise(monitorWin)
+	app.Manager.Raise(romWin)
 
 	// Run loop. App.Tick fires on the UI goroutine, so simulator
 	// advancement, register reads, and bus reads all serialize
@@ -400,8 +464,7 @@ func main() {
 	// give the timer chip multiple chances to fire per batch, which
 	// is also more faithful to real hardware where the timer's
 	// crystal runs continuously.
-	const subTicks = 10
-	subPeriod := tickPeriod / subTicks
+	// subTicks/subPeriod removed: Hub Pump owns sub-cycle slicing.
 
 	// Pick a scope sampling stride that matches the current CPU
 	// speed. At low Hz the buffer fills slowly enough that we
@@ -432,31 +495,34 @@ func main() {
 	// the demo level: every demo programs ACR *before* writing
 	// T1C_H, so T1 arms straight into free-run.
 	app.Tick(tickPeriod, func() {
+		// CPU + peripheral driving lives on the Hub Pump (see
+		// sharedHub above). This callback only nudges UI state that
+		// the foxpro draw loop needs on a steady cadence — scope
+		// decimation auto-tunes off the current speed.
 		scopeProv.Decimate = scopeDecimate()
-		for i := 0; i < subTicks; i++ {
-			// inst.Advance == drv.Advance + bp.Tick, in lockstep —
-			// the exact pairing this loop used to hand-duplicate.
-			inst.Advance(subPeriod)
-		}
 	})
 
-	// Global key bindings — same set as the TUI.
+	// Global key bindings — same set as the TUI. Skipped when the
+	// Monitor's REPL is focused so typed verbs flow into its input.
 	app.OnKey = func(ev *tcell.EventKey) bool {
 		if ev.Key() != tcell.KeyRune {
 			return false
 		}
+		if app.Manager.Active() == monitorWin {
+			return false
+		}
 		switch ev.Rune() {
 		case 'r', 'R':
-			clockProv.SetRunning(true)
+			sharedHub.CmdRun(0, 0)
 			return true
 		case '.':
-			clockProv.SetRunning(false)
+			sharedHub.CmdStop()
 			return true
 		case 's', 'S':
-			clockProv.StepInstruction()
+			func() { sharedHub.CmdStep("instruction", 1) }()
 			return true
 		case 't', 'T':
-			clockProv.StepOne()
+			func() { sharedHub.CmdStep("halfcycle", 1) }()
 			return true
 		case 'z', 'Z':
 			machineReset()
@@ -476,7 +542,7 @@ func main() {
 	// running before, the new demo starts running immediately.
 	loadDemo := func(d demos.Demo) {
 		wasRunning := clockProv.Running()
-		clockProv.SetRunning(false)
+		sharedHub.CmdStop()
 		dispCtrl.Reset()
 		gfxPlane.Clear(0)
 		via1.Reset()
@@ -502,7 +568,7 @@ func main() {
 		// be false and the explicit start at end of main() will
 		// kick things off.
 		if wasRunning {
-			clockProv.SetRunning(true)
+			sharedHub.CmdRun(0, 0)
 		}
 	}
 
@@ -518,7 +584,7 @@ func main() {
 			return
 		}
 		wasRunning := clockProv.Running()
-		clockProv.SetRunning(false)
+		sharedHub.CmdStop()
 		newBackend, err := buildBackend(name)
 		if err != nil {
 			return
@@ -547,7 +613,7 @@ func main() {
 		}
 		machineReset()
 		if wasRunning {
-			clockProv.SetRunning(true)
+			sharedHub.CmdRun(0, 0)
 		}
 	}
 
@@ -583,10 +649,10 @@ func main() {
 		{
 			Label: "&Run",
 			Items: []foxpro.MenuItem{
-				{Label: "R&un", Hotkey: "R", OnSelect: func() { clockProv.SetRunning(true) }},
-				{Label: "S&top", Hotkey: ".", OnSelect: func() { clockProv.SetRunning(false) }},
-				{Label: "&Step instruction", Hotkey: "S", OnSelect: clockProv.StepInstruction},
-				{Label: "&Tick (½ cycle)", Hotkey: "T", OnSelect: clockProv.StepOne},
+				{Label: "R&un", Hotkey: "R", OnSelect: func() { sharedHub.CmdRun(0, 0) }},
+				{Label: "S&top", Hotkey: ".", OnSelect: func() { sharedHub.CmdStop() }},
+				{Label: "&Step instruction", Hotkey: "S", OnSelect: func() { sharedHub.CmdStep("instruction", 1) }},
+				{Label: "&Tick (½ cycle)", Hotkey: "T", OnSelect: func() { sharedHub.CmdStep("halfcycle", 1) }},
 			},
 		},
 		{
@@ -607,9 +673,29 @@ func main() {
 			Items: []foxpro.MenuItem{
 				{Label: "&Command", Hotkey: "Ctrl+F2", OnSelect: app.ToggleCommandWindow},
 				{Label: "C&ycle", Hotkey: "F6", OnSelect: app.Manager.FocusNext},
+				{Separator: true},
+				{Label: "Toggle &Monitor", OnSelect: func() {
+					if app.Manager.Contains(monitorWin) {
+						app.Manager.Remove(monitorWin)
+					} else {
+						app.Manager.Add(monitorWin)
+						app.Manager.Raise(monitorWin)
+					}
+				}},
 			},
 		},
 	})
+
+	// Plumb the SimHost's quit + help-window hooks now that app is
+	// fully constructed. Wasm `q` / `quit` calls app.Quit which the
+	// foxpro-wasm runtime handles gracefully.
+	simHost.quit = app.Quit
+	simHost.helpOpener = func() {
+		hw := foxpro.NewWindow("Help — Monitor",
+			foxpro.Rect{X: 6, Y: 2, W: 70, H: 28},
+			foxpro.NewTextProvider(monitor.HelpTable))
+		app.Manager.Add(hw)
+	}
 
 	// Live tray — top-right of the menu bar. Three cells, each
 	// clickable: speed (opens picker), running/stopped (toggles),
@@ -638,7 +724,13 @@ func main() {
 				}
 				return "stopped"
 			},
-			OnClick: func() { clockProv.SetRunning(!clockProv.Running()) },
+			OnClick: func() {
+				if clockProv.Running() {
+					sharedHub.CmdStop()
+				} else {
+					sharedHub.CmdRun(0, 0)
+				}
+			},
 		},
 		{
 			Compute: func() string {
@@ -666,7 +758,7 @@ func main() {
 	// the Clock window or '<' / '>' keys if they want a slower view.
 	clockProv.SetSpeedHz(0)
 
-	clockProv.SetRunning(true) // browser visitors expect motion right away
+	sharedHub.CmdRun(0, 0) // browser visitors expect motion right away
 	wasm.Run(app, s)
 }
 
