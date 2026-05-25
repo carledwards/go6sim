@@ -80,3 +80,15 @@ func (a *Adapter) SYNC() bool { return a.cpu.SYNC() }
 
 // Compile-time check that Adapter satisfies cpu.Backend.
 var _ cpu.Backend = (*Adapter)(nil)
+
+// NodeCount returns the allocated node count of the underlying
+// transistor netlist. Visualisation clients (visualcpuwin) snapshot
+// the full node-state vector per frame for polygon colouring.
+// Interp doesn't model nodes, so this method exists only on
+// Adapter; visualcpuwin uses an interface check to opt in.
+func (a *Adapter) NodeCount() int { return a.cpu.NodeCount() }
+
+// NodeStates fills out with the per-node logical state. out must
+// have length >= NodeCount(). Cheap linear copy from the live node
+// pointers — no recalc.
+func (a *Adapter) NodeStates(out []bool) { a.cpu.NodeStates(out) }

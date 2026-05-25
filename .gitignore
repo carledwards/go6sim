@@ -1,4 +1,5 @@
 /bin/
+/6502-sim
 *.prof
 .DS_Store
 
@@ -9,6 +10,14 @@
 /web/go6asm.wasm
 /web/wasm_exec.js
 /web/foxpro.js
+
+# Remote-CPU host artifacts — rebuilt by `make host-wasm` and
+# embedded into the TUI binary at `go build ./cmd/6502-sim` time
+# via web/cpu-host/embed.go. Source-of-truth is cmd/cpu-host-wasm/*.go
+# and web/cpu-host/{index.html, host.js}.
+/web/cpu-host/host.wasm
+/web/cpu-host/wasm_exec.js
+/web/cpu-host/foxpro.js
 
 .claude/
 

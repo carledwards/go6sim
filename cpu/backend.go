@@ -56,6 +56,14 @@ type Backend interface {
 	IRQ() bool
 	NMI() bool
 
+	// MaxHz reports the highest sustained clock rate this backend
+	// can deliver on the current host, in Hz. 0 means "uncapped"
+	// (interp). The speed picker uses this to hide non-Max entries
+	// the backend can't actually reach, so the tray label never
+	// lies about the configured rate. netsim returns ~22 kHz on
+	// native builds and ~6 kHz under wasm via build-tagged files.
+	MaxHz() int
+
 	// SYNC reports the SYNC pin state — true on the half-cycle
 	// where the CPU is fetching an opcode (T1 cycle). Used by
 	// observers (logic analyzer, debugger) as a backend-agnostic

@@ -31,6 +31,7 @@ func (f *fakeCPU) ReadCycle() bool          { return true }
 func (f *fakeCPU) IRQ() bool                { return true }
 func (f *fakeCPU) NMI() bool                { return true }
 func (f *fakeCPU) SYNC() bool               { return false }
+func (f *fakeCPU) MaxHz() int                { return 0 }
 
 // fakeSyncCPU pulses SYNC=true every `cycleHalves` halfSteps and
 // keeps PC pinned at 0 — the test fixture for the JMP-self regression.
@@ -57,6 +58,7 @@ func (f *fakeSyncCPU) SYNC() bool {
 	}
 	return f.half%f.cycleHalves == 0 && f.half > 0
 }
+func (f *fakeSyncCPU) MaxHz() int { return 0 }
 
 func TestStepOneAndObserverGate(t *testing.T) {
 	f := &fakeCPU{}

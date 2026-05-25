@@ -77,6 +77,47 @@
     height: auto;
   }
 
+  /* --- quick-pick demo presets, sits between canvas and info cards --- */
+  .quickpick {
+    width: 100%;
+    max-width: 1100px;
+    margin: 18px 0 0;
+    padding: 0 8px;
+    box-sizing: border-box;
+  }
+  .quickpick h2 {
+    font-size: 12px;
+    margin: 0 0 8px;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    text-transform: uppercase;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-weight: 600;
+  }
+  .picks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .picks button {
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 8px 14px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color 100ms ease-out, background 100ms ease-out;
+  }
+  .picks button:hover {
+    border-color: var(--accent);
+    background: #1a1a1a;
+  }
+  .picks button:active {
+    background: #0e0e0e;
+  }
+
   /* --- info section below canvas --- */
   .info {
     width: 100%;
@@ -205,6 +246,11 @@
     <canvas id="screen" tabindex="0"></canvas>
   </div>
 
+  <section class="quickpick">
+    <h2>Demo Quick Pick</h2>
+    <div class="picks" id="picks"></div>
+  </section>
+
   <section class="info">
     <h1>About this thing</h1>
     <p class="lede">
@@ -244,7 +290,7 @@
       <div class="card">
         <h2>What's in the machine</h2>
         <ul>
-          <li><strong>CPU</strong> &mdash; two backends: a fast interpreter and a transistor-level netlist sim.</li>
+          <li><strong>CPU</strong> &mdash; two backends: a fast interpreter and a transistor-level netlist sim built on data from <a href="https://github.com/trebonian/visual6502">Visual6502</a>.</li>
           <li><strong>VIC</strong> &mdash; 40&times;13 char/color planes plus a 160&times;100 4-bpp graphics plane with hardware blits, fills, lines, and circles.</li>
           <li><strong>VIA #1</strong> &mdash; 65C22 chip with Timer&nbsp;1 free-running on its own 1&nbsp;MHz oscillator, IFR/IER, polling-style pacing.</li>
           <li><strong>RAM/ROM</strong> &mdash; 8&nbsp;KB each, reset vector at <code>$FFFC</code>.</li>
@@ -301,6 +347,12 @@
     </div>
 
     <hr class="sep">
+    <p style="font-size: 12px; color: var(--muted); text-align: center; margin: 0 0 6px;">
+      Transistor data, node IDs, and the die color palette are derived from
+      <a href="https://github.com/trebonian/visual6502">Visual6502</a> by Greg James,
+      Brian Silverman, and Barry Silverman
+      (<a href="http://creativecommons.org/licenses/by-nc-sa/3.0/">CC&nbsp;BY-NC-SA&nbsp;3.0</a>).
+    </p>
     <p style="font-size: 12px; color: var(--muted); text-align: center; margin: 0;">
       Carl Edwards &middot;
       <a href="https://thecarledwards.com">thecarledwards.com</a>

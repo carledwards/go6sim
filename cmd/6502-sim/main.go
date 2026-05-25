@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"runtime"
 	"runtime/pprof"
@@ -26,6 +27,8 @@ import (
 	"github.com/carledwards/go6sim/cpu"
 	"github.com/carledwards/go6sim/cpu/interp"
 	"github.com/carledwards/go6sim/cpu/netsim"
+	cpuremote "github.com/carledwards/go6sim/cpu/remote"
+	cpuhost "github.com/carledwards/go6sim/web/cpu-host"
 	"github.com/carledwards/go6sim/instrument"
 	"github.com/carledwards/go6sim/internal/demos"
 	"github.com/carledwards/go6sim/ui/clockwin"
@@ -143,9 +146,10 @@ func main() {
 	// Interp is fast enough to make the marquee look alive without
 	// the user having to tweak anything; -cpu=netsim opts into the
 	// transistor-level backend for visualization.
-	cpuFlag := flag.String("cpu", "interp", "CPU backend: interp or netsim")
+	cpuFlag := flag.String("cpu", "interp", "CPU backend: interp, netsim, or remote")
+	remoteAddr := flag.String("remote-addr", ":7777", "for -cpu=remote: HTTP+WebSocket bind (clients dial ws://host/cpu)")
 	runFlag := flag.Bool("run", true, "start the clock running immediately (default true)")
-	speedFlag := flag.String("speed", "max", "starting clock speed: 1, 10, 20, 100, 1k (or 1000), max")
+	speedFlag := flag.String("speed", "max", "starting clock speed: 1, 10, 20, 100, 1k, 10k, 1M, 2M, max")
 	batchFlag := flag.Int("batch", 0, "max HalfSteps per UI tick (0 = auto-tune at startup based on the chosen backend)")
 	cpuProfile := flag.String("cpuprofile", "", "write CPU profile to file (active for the lifetime of the process)")
 	memProfile := flag.String("memprofile", "", "write heap profile to file at exit")
@@ -236,8 +240,13 @@ func main() {
 			return netsim.New(b)
 		case "interp":
 			return interp.New(b), nil
+		case "remote":
+			// HTTP listener (CPU WS + static host files) is stood
+			// up below after we have the hub for the connect /
+			// disconnect callbacks.
+			return cpuremote.New(b), nil
 		}
-		return nil, fmt.Errorf("unknown cpu %q (want netsim or interp)", name)
+		return nil, fmt.Errorf("unknown cpu %q (want interp, netsim, or remote)", name)
 	}
 
 	backend, err := buildBackend(*cpuFlag)
@@ -370,7 +379,43 @@ func main() {
 	go sharedHub.Run(hubCtx)
 	defer cancelHub()
 
-	remote := &RemoteState{} // kept for the serve listener; no longer used for lockout
+	// Remote-CPU listener + connect/disconnect hooks. On connect,
+	// fire a reset so the freshly-paired CPU is in a known state
+	// (we treat each new pairing as a fresh boot per the "remote
+	// CPU always owns the bus state" design). On disconnect, auto-
+	// pause so the Pump isn't spinning noops against a dead conn.
+	// The HTTP listener is also where v0b will serve the browser
+	// host page (web/cpu-host/) and the host wasm; for now just the
+	// /cpu WebSocket endpoint is live.
+	if ra, ok := backend.(*cpuremote.Adapter); ok {
+		ra.SetCallbacks(
+			// On connect: reset to a known state, then start the
+			// Pump so the user doesn't have to press R every time
+			// they reload the browser. Pair this with the auto-
+			// stop on disconnect and the round-trip "open page →
+			// see demo running" is one click.
+			func() {
+				sharedHub.CmdReset()
+				sharedHub.CmdRun(0, 0)
+			},
+			func() { sharedHub.CmdStop() },
+		)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/cpu", ra.HandleWS)
+		mux.Handle("/", http.FileServer(http.FS(cpuhost.FS())))
+		go func() {
+			log.Printf("remote-cpu listener on %s — open http://%s/ in your browser", *remoteAddr, *remoteAddr)
+			if err := http.ListenAndServe(*remoteAddr, mux); err != nil {
+				log.Printf("remote-cpu listener stopped: %v", err)
+			}
+		}()
+	}
+
+	// serveState tracks listener-side state for the legacy --serve
+	// bridge listener (separate from -cpu=remote, which is the
+	// newer Remote-CPU listener). Named distinctly so it doesn't
+	// shadow the cpuremote import in scope-aware tooling.
+	serveState := &RemoteState{}
 	if *serveAddr != "" {
 		loader := newSimTUILoader(sharedHub, func(image []byte) error {
 			mainROM.Clear()
@@ -383,7 +428,7 @@ func main() {
 			sharedHub.CmdReset()
 			return nil
 		})
-		if err := StartServe(context.Background(), *serveAddr, loader, remote); err != nil {
+		if err := StartServe(context.Background(), *serveAddr, loader, serveState); err != nil {
 			log.Fatalf("--serve: %v", err)
 		}
 	}
@@ -779,9 +824,9 @@ func main() {
 		cpuWindow.Title = fmt.Sprintf("CPU (%s)", name)
 		// If the prior speed is above the new backend's plausible
 		// ceiling (e.g. switching from interp@1MHz to netsim, which
-		// caps near 26 kHz), drop to Max so the displayed speed
-		// matches what's actually delivered.
-		if limit := cpuMaxSettableHz(name); limit > 0 {
+		// caps near 22 kHz native / 6 kHz under wasm), drop to Max
+		// so the displayed speed matches what's actually delivered.
+		if limit := newBackend.MaxHz(); limit > 0 {
 			if cur := clockProv.Speed().Hz; cur != 0 && cur > limit {
 				clockProv.SetSpeedHz(0)
 			}
@@ -849,7 +894,7 @@ func main() {
 				{Label: "&Reset", Hotkey: "Z", OnSelect: machineReset},
 				{Separator: true},
 				{Label: "&CPU...", OnSelect: func() { openCPUPicker(app, &currentCPU, switchCPU) }},
-				{Label: "&Speed...", OnSelect: func() { openSpeedPicker(app, clockProv, currentCPU) }},
+				{Label: "&Speed...", OnSelect: func() { openSpeedPicker(app, clockProv) }},
 			},
 		},
 		{
@@ -903,7 +948,7 @@ func main() {
 				}
 				return sp.Label
 			},
-			OnClick: func() { openSpeedPicker(app, clockProv, currentCPU) },
+			OnClick: func() { openSpeedPicker(app, clockProv) },
 		},
 		{
 			Compute: func() string {
@@ -941,11 +986,17 @@ func main() {
 			hz = 100
 		case "1k", "1000":
 			hz = 1000
+		case "10k", "10000":
+			hz = 10000
+		case "1M", "1000000":
+			hz = 1000000
+		case "2M", "2000000":
+			hz = 2000000
 		case "max", "0":
 			hz = 0
 		}
 		if hz < 0 || !clockProv.SetSpeedHz(hz) {
-			fmt.Fprintf(os.Stderr, "unknown -speed=%q (want 1, 10, 20, 100, 1k, max)\n", *speedFlag)
+			fmt.Fprintf(os.Stderr, "unknown -speed=%q (want 1, 10, 20, 100, 1k, 10k, 1M, 2M, max)\n", *speedFlag)
 			os.Exit(2)
 		}
 	}
@@ -990,11 +1041,56 @@ func cpuPickerOptions() []dialog.Option {
 
 // openCPUPicker pops the Hardware → CPU... dialog. current points at
 // the host's currentCPU variable so the live value is read at open
-// time.
+// time. In remote mode the picker is replaced with an info window —
+// the active CPU lives on the connected client, not in this process,
+// so swapping backends here would be meaningless.
 func openCPUPicker(a *foxpro.App, current *string, switchCPU func(name string)) {
+	if *current == "remote" {
+		openInfoMessage(a, "CPU is remote-controlled", []string{
+			"This simulator was started with -cpu=remote.",
+			"",
+			"The active CPU lives on the connected client",
+			"(visual6502 in a browser, an FPGA-hosted 6502,",
+			"or a Go binary speaking the remote-CPU protocol).",
+			"",
+			"Restart without -cpu=remote to use a different CPU.",
+		})
+		return
+	}
 	sw, sh := a.Screen.Size()
 	var w *foxpro.Window
 	w = dialog.NewWindow("Choose CPU", cpuPickerOptions(), *current, switchCPU, nil, sw, sh)
+	w.OnClose = func() { a.Manager.Remove(w) }
+	a.Manager.Add(w)
+}
+
+// openInfoMessage pops a small dismissable text window. Used for
+// "operation not available" feedback where a full picker isn't right
+// but a silent no-op would feel broken (the user just clicked
+// something).
+func openInfoMessage(a *foxpro.App, title string, lines []string) {
+	body := foxpro.NewTextProvider(lines)
+	width := 0
+	for _, ln := range lines {
+		if n := len(ln); n > width {
+			width = n
+		}
+	}
+	width += 4 // border + padding
+	if width < 30 {
+		width = 30
+	}
+	height := len(lines) + 4
+	sw, sh := a.Screen.Size()
+	x := (sw - width) / 2
+	y := (sh - height) / 2
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	w := foxpro.NewWindow(title, foxpro.Rect{X: x, Y: y, W: width, H: height}, body)
 	w.OnClose = func() { a.Manager.Remove(w) }
 	a.Manager.Add(w)
 }
@@ -1033,16 +1129,16 @@ func openDemoPicker(a *foxpro.App, current *string, loadDemo func(demos.Demo), a
 
 // openSpeedPicker pops the Hardware → Speed... dialog letting the
 // user pick a clock speed (the same set the < / > keys cycle).
-// Speeds beyond the current backend's plausible ceiling are
-// filtered out — netsim caps around 26 kHz, so offering 100 kHz or
-// 1 MHz would just run at netsim's max while the tray label lied
-// about the configured rate. cpuMaxSettableHz is the cutoff.
+// Speeds beyond the active backend's MaxHz() ceiling are filtered
+// out so the tray label never lies — offering 1 MHz under netsim
+// would just run at netsim's real ceiling (~22 kHz native / ~6 kHz
+// wasm) while pretending otherwise.
 // Descriptions are intentionally omitted — labels are self-evident,
 // and the picker auto-collapses to a compact box.
-func openSpeedPicker(a *foxpro.App, clockProv *clockwin.Provider, currentCPU string) {
+func openSpeedPicker(a *foxpro.App, clockProv *clockwin.Provider) {
 	sw, sh := a.Screen.Size()
 	current := clockProv.Speed().Label
-	limit := cpuMaxSettableHz(currentCPU)
+	limit := clockProv.Backend.MaxHz()
 	opts := make([]dialog.Option, 0, len(clockwin.Speeds))
 	for _, sp := range clockwin.Speeds {
 		if sp.Hz != 0 && limit > 0 && sp.Hz > limit {
@@ -1061,17 +1157,6 @@ func openSpeedPicker(a *foxpro.App, clockProv *clockwin.Provider, currentCPU str
 	}, nil, sw, sh)
 	w.OnClose = func() { a.Manager.Remove(w) }
 	a.Manager.Add(w)
-}
-
-// cpuMaxSettableHz returns the highest non-Max speed entry that
-// makes sense for the given backend. 0 = no cap (interp can hit
-// every entry). Netsim caps at 10 kHz: its real ceiling is around
-// 26 kHz, so 10 kHz is achievable while 100 kHz / 1 MHz are not.
-func cpuMaxSettableHz(name string) int {
-	if name == "netsim" {
-		return 10000
-	}
-	return 0
 }
 
 // stripAccel removes the FoxPro accelerator-marker '&' from a label

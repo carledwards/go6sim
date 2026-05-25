@@ -6,7 +6,7 @@ ticking on its own crystal, and a small library of demo programs. Built
 on top of [`foxpro-go`](https://github.com/carledwards/foxpro-go)
 (FoxPro-for-DOS-style TUI framework) and
 [`6502-netsim-go`](https://github.com/carledwards/6502-netsim-go)
-(transistor-level Visual6502 port). Each component plugs into a shared
+(transistor-level [Visual6502](https://github.com/trebonian/visual6502) port). Each component plugs into a shared
 bus at hardware-realistic chip-select boundaries; each gets its own
 draggable window.
 
@@ -32,6 +32,25 @@ CPU window, memory viewer, Monitor REPL, and the VIC graphics demo
 all driven by the same backend that runs in the terminal.
 
 ![Wasm Emulation](docs/images/wasm_emu.gif)
+
+**Remote CPU, in the terminal** — the TUI started with
+`-cpu=remote`. RAM, ROM, VIA, and the framebuffer live here; the
+CPU itself is the Visual 6502 transistor sim running in a browser
+tab, talking back over a WebSocket. The CPU window flips from
+"waiting" to live the instant the browser page connects.
+
+![Remote CPU in the TUI](docs/images/tui_remote_cpu.gif)
+
+**Visual 6502 view** — the browser build (the same `wasm_emu.gif`
+machine above) with the Visual 6502 window open. It's a live,
+transistor-level rendering of the actual 6502 die — every one of
+the chip's ~3,500 transistors, drawn from the original
+[Visual6502](https://github.com/trebonian/visual6502) project's
+polygon data — lit up node-by-node as your code executes. Click
+the chip to flip on labelled annotations for the pin pads and
+internal register blocks.
+
+![Visual 6502 in the browser](docs/images/wasm_visual6502.gif)
 
 ## Quickstart
 
@@ -198,11 +217,43 @@ WAIT: LDA $B00D         ; IFR
 | Backend  | Speed       | What it is                                            |
 |----------|-------------|-------------------------------------------------------|
 | `interp` | several MHz | Conventional 151-opcode interpretive 6502 (default)   |
-| `netsim` | ~26 kHz     | Transistor-level Visual6502 port — every cycle simulates ~3500 transistors |
+| `netsim` | ~26 kHz     | Transistor-level [Visual6502](https://github.com/trebonian/visual6502) port — every cycle simulates ~3500 transistors |
+| `remote` | wire-bound  | The CPU lives in another process — a browser tab, an FPGA on the LAN, a Pi across the room — dialed in over a WebSocket. The TUI keeps the bus, RAM, ROM, and VIA local; every cycle round-trips for memory access |
 
 The `Backend` interface (`cpu/backend.go`) lets you swap at runtime
-via the **CPU** menu. Both expose the same address/data bus state
-plus IRQ/NMI for the simulator's introspection windows.
+via the **CPU** menu. All three expose the same address/data bus
+state plus IRQ/NMI for the simulator's introspection windows.
+
+### Remote CPU — watch the silicon think in a browser tab
+
+Start the TUI with `-cpu=remote` and it boots into "waiting" mode
+with no CPU. The terminal binds an HTTP listener (`-remote-addr
+:7777` by default) that serves both the `/cpu` WebSocket endpoint
+*and* a self-hosted browser page at `/`:
+
+```sh
+./bin/6502-sim -cpu=remote
+# then open http://localhost:7777/ in your browser
+```
+
+The page boots a foxpro-go shell containing the transistor-level
+`netsim` core wired to a [Visual6502](https://github.com/trebonian/visual6502)-style
+live die rendering. As soon as the page connects, the TUI's CPU
+window stops saying "waiting" and the demo starts running — every
+half-cycle round-trips between the terminal (which owns RAM, ROM,
+VIA timers, and the framebuffer) and the browser (which owns the
+CPU). The chip lights up node-by-node as instructions execute, with
+the TUI showing the same activity on the bus side.
+
+It's not fast — roughly 400 Hz on a localhost loop, slower over a
+LAN — but that's the point. You can read it. Close the browser tab
+and the TUI auto-pauses; open it again and it auto-resumes from
+reset.
+
+Same protocol works for any client that speaks the wire
+(`cpu/remote/proto.go`): there's a Go-only reference at
+`cmd/6502-cpu-fake/` for smoke testing, and the door is open for an
+FPGA-hosted real 6502 driving a TUI over TCP.
 
 ## Windows
 
@@ -360,6 +411,17 @@ chip-select region with realistic mirroring (the 6522's 16 registers
 mirror through a 256-byte CS block, exactly as on a real board with
 only RS0–RS3 hooked up). Demos written here should run on real
 silicon without modification.
+
+## Credits
+
+The transistor-level CPU backend (`netsim`) and the live die view
+(`ui/visualcpuwin`) are built on data from
+[Visual6502](https://github.com/trebonian/visual6502) by **Greg James,
+Brian Silverman, and Barry Silverman** — the segment-definition polygon
+table, node IDs, and layer color palette all come from that project.
+The Visual6502 work is licensed under
+[CC BY-NC-SA 3.0](http://creativecommons.org/licenses/by-nc-sa/3.0/);
+see [NOTICES](NOTICES) for the redistribution details.
 
 ## License
 

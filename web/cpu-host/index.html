@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote CPU Host — go6sim</title>
+<style>
+  :root {
+    --bg: #111;
+    --fg: #eee;
+    --muted: #888;
+    --accent: #4a9;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, system-ui, sans-serif;
+    min-height: 100%;
+  }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 12px;
+  }
+  #status {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 8px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .crt {
+    padding: 14px;
+    border-radius: 14px;
+    background: linear-gradient(180deg, #2c2c2c 0%, #1a1a1a 60%, #141414 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 6px 14px rgba(0, 0, 0, 0.55),
+      0 28px 70px rgba(0, 0, 0, 0.7);
+  }
+  canvas {
+    background: #000;
+    image-rendering: pixelated;
+    outline: none;
+    display: block;
+    border-radius: 4px;
+    /* Both constraints + height:auto = canvas shrinks to fit viewport
+       while preserving its intrinsic aspect ratio. The Go side keeps
+       a fixed 106×59 cell grid; CSS just rescales the rendered pixels
+       so windows + chip view stay legible on smaller screens. */
+    max-width: calc(100vw - 28px);
+    max-height: calc(100vh - 90px);
+    height: auto;
+  }
+  .lede {
+    max-width: 800px;
+    margin: 18px auto 0;
+    font-size: 13.5px;
+    line-height: 1.5;
+    color: #ccc;
+    text-align: center;
+    padding: 0 12px;
+  }
+  .lede a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="status">loading…</div>
+  <div class="crt">
+    <canvas id="screen" tabindex="0"></canvas>
+  </div>
+  <p class="lede">
+    This page is the <strong>Remote CPU Host</strong> for the go6sim TUI you started with
+    <code>-cpu=remote</code>. A 6502 interpreter runs here, in your browser, and proxies every
+    bus access back to the TUI over a WebSocket. The "Connection" panel above shows the live
+    state of that pairing. A later step will swap the interpreter for the vendored
+    <a href="https://github.com/trebonian/visual6502">Visual6502</a> transistor engine.
+  </p>
+</div>
+<script src="wasm_exec.js"></script>
+<script src="foxpro.js"></script>
+<script src="host.js"></script>
+</body>
+</html>

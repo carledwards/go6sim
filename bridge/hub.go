@@ -271,6 +271,15 @@ type Pump struct {
 	// would otherwise starve the JS event loop; on native the
 	// field is set but never read.
 	lastYield time.Time
+
+	// paceDeadline is the wall-clock time the current slice's sleep
+	// should end at. Advanced by virtualDt each iteration rather
+	// than re-anchored to time.Now() so timer slop (typically
+	// 0.5–1ms per sleep on macOS/Linux) doesn't accumulate as a
+	// steady ~4% understatement of the configured rate. Zero
+	// when the Pump isn't running — set on the first paced slice
+	// after a transition to running and cleared in the idle branch.
+	paceDeadline time.Time
 }
 
 const stateSnapshotInterval = 100 * time.Millisecond
@@ -328,6 +337,10 @@ func (h *Hub) Run(ctx context.Context) {
 		//    command. Crystal keeps running; ISR work doesn't happen
 		//    (no CPU advancement) but timer counters/IFR bits update.
 		if !p.running {
+			// Clear the pacing deadline so the next run starts a
+			// fresh schedule from time.Now() instead of trying to
+			// catch up the idle interval.
+			p.paceDeadline = time.Time{}
 			select {
 			case cmd := <-h.commandsCh:
 				h.queryMu.Lock()
@@ -345,17 +358,23 @@ func (h *Hub) Run(ctx context.Context) {
 
 		// 3. Compute the slice budget. With a configured speed we
 		//    chunk so each slice covers ~sliceWallTarget of wall time
-		//    at the target Hz; unlimited (hz <= 0) uses the flat cap.
+		//    at the target Hz, with NO upper clamp — the per-slice
+		//    paced sleep below already bounds wall time per iteration,
+		//    so a bigger slice just means fewer-but-longer iterations
+		//    with the same wall budget and far less per-slice
+		//    overhead (timer alloc + select + queryMu). Clamping here
+		//    used to throttle 100kHz+ targets to ~83 % of setpoint
+		//    because the cap forced ~10k tiny iterations/sec and the
+		//    overhead added up. Unlimited mode (hz <= 0) still uses
+		//    the flat cap to keep the UI responsive between command
+		//    drains.
 		configuredHz := h.inst.Driver().Speed().Hz
 		sliceHalves := sliceHalvesMax
 		if configuredHz > 0 {
 			s := int(int64(2*configuredHz) *
 				int64(sliceWallTarget) / int64(time.Second))
-			switch {
-			case s < 2:
+			if s < 2 {
 				s = 2
-			case s > sliceHalvesMax:
-				s = sliceHalvesMax
 			}
 			sliceHalves = s
 		}
@@ -365,18 +384,55 @@ func (h *Hub) Run(ctx context.Context) {
 		sliceStart := time.Now()
 		h.queryMu.Lock()
 		r := h.inst.RunUntil(sliceHalves)
-		// Tick peripherals for the same virtual time the CPU advanced;
-		// RunUntil is CPU-only by design (see instrument.RunUntil).
+		// Tick peripherals. The VIA's crystal runs independently of
+		// the CPU clock, so its tick budget should always reflect
+		// real wall time the slice consumed — NOT a halfCycles-
+		// derived virtual time that assumes the CPU hits its target
+		// rate. The two paths:
+		//
+		//   - Max mode (configuredHz==0): wall time IS the right
+		//     budget. With interp at 11 MHz the slice runs in ~18 µs
+		//     and VIA gets 18 µs → effectively 1 MHz crystal. With
+		//     remote netsim at 2 kHz the slice runs in ~50 ms and
+		//     VIA gets 50 ms → still 1 MHz crystal. Without this,
+		//     slow backends (remote) underran VIA by 500×.
+		//   - Paced mode (configuredHz>0): the post-slice sleep
+		//     makes wall time match halfCycles/2hz, so the two
+		//     formulae are equivalent. Ticking inside the slice
+		//     window (before sleep) keeps the legacy contract that
+		//     peripherals are caught up before observers query them.
 		hz := configuredHz
+		var tickDt time.Duration
 		if hz <= 0 {
-			hz = 1_000_000
+			tickDt = time.Since(sliceStart)
+		} else {
+			tickDt = time.Duration(r.HalfCycles) *
+				time.Second / time.Duration(2*hz)
 		}
-		virtualDt := time.Duration(r.HalfCycles) *
-			time.Second / time.Duration(2*hz)
-		h.inst.Tick(virtualDt)
+		h.inst.Tick(tickDt)
 		h.queryMu.Unlock()
 
 		p.consumedTotal += r.HalfCycles
+
+		// Backstop: if a slice completed but the CPU made zero
+		// progress (e.g. remote-CPU backend with no client paired —
+		// HalfStep noops and RunUntil burns its budget in microseconds),
+		// yield so the UI render goroutine can grab queryMu. Without
+		// this the running-Pump loop tightly holds the lock and the
+		// TUI goes blank. A short sleep is fine here; real backends
+		// always advance halfCycles>0, so they never hit this path.
+		if r.HalfCycles == 0 {
+			select {
+			case cmd := <-h.commandsCh:
+				h.queryMu.Lock()
+				cmd(p)
+				h.queryMu.Unlock()
+			case <-time.After(16 * time.Millisecond):
+			case <-ctx.Done():
+				return
+			}
+			continue
+		}
 
 		// 4b. Auto-deassert the host-IRQ line after the slice in
 		//     which it was raised. The CPU samples IRQ at every
@@ -427,13 +483,26 @@ func (h *Hub) Run(ctx context.Context) {
 			continue
 		}
 
-		// 7. Pace: if a finite speed is configured, sleep enough
-		//    wall-clock so the slice consumed `virtualDt` of real
-		//    time. Sleep is select-interruptible so Stop/Step/Reset
-		//    don't wait out the full window — critical at 1–10 Hz
-		//    where virtualDt is hundreds of ms per slice.
+		// 7. Pace: if a finite speed is configured, sleep until the
+		//    next deadline. The deadline advances by virtualDt each
+		//    iteration (NOT re-anchored to time.Now after sleep), so
+		//    per-sleep timer slop doesn't compound into a steady
+		//    ~4 % rate understatement. If we've genuinely fallen
+		//    behind (deadline already past), snap the deadline to
+		//    now so we don't try to make up lost time by running at
+		//    infinite speed — the rate display will read low, which
+		//    is honest. Sleep is select-interruptible so Stop/Step/
+		//    Reset don't wait out the full window at low Hz.
 		if configuredHz > 0 {
-			remaining := virtualDt - time.Since(sliceStart)
+			if p.paceDeadline.IsZero() {
+				p.paceDeadline = sliceStart
+			}
+			p.paceDeadline = p.paceDeadline.Add(tickDt)
+			now := time.Now()
+			if now.After(p.paceDeadline) {
+				p.paceDeadline = now
+			}
+			remaining := p.paceDeadline.Sub(now)
 			if remaining > 0 {
 				timer := time.NewTimer(remaining)
 				select {

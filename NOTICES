@@ -1,0 +1,27 @@
+go6sim — third-party attribution
+================================
+
+This project redistributes data derived from Visual6502 in two places:
+
+  ui/visualcpuwin/segdefs.go       die polygon table (8233 segments)
+  ui/visualcpuwin/nodelocs.go      6502 node IDs (pads + register
+                                   clusters) used for the live die view
+                                   labels and overlay highlighting
+  ui/visualcpuwin/render.go        per-layer color palette + alpha
+                                   values mirroring expertWires.js
+
+The transistor-level CPU backend in `cpu/netsim/` wraps
+`github.com/carledwards/6502-netsim-go`, which itself ports the
+Visual6502 transistor net.
+
+Original work
+-------------
+
+  Visual6502 — https://github.com/trebonian/visual6502
+  by Greg James, Brian Silverman, and Barry Silverman.
+
+  Licensed under Creative Commons Attribution-NonCommercial-ShareAlike
+  3.0:  http://creativecommons.org/licenses/by-nc-sa/3.0/
+
+The derivative files listed above remain under CC BY-NC-SA 3.0. The
+rest of go6sim is MIT-licensed (see LICENSE).

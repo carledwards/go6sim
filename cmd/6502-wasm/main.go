@@ -44,6 +44,7 @@ import (
 	"github.com/carledwards/go6sim/internal/monitor"
 	"github.com/carledwards/go6sim/ui/clockwin"
 	"github.com/carledwards/go6sim/ui/cpuwin"
+	"github.com/carledwards/go6sim/ui/visualcpuwin"
 	"github.com/carledwards/go6sim/ui/displaywin"
 	"github.com/carledwards/go6sim/ui/ramwin"
 	"github.com/carledwards/go6sim/ui/scopewin"
@@ -210,8 +211,9 @@ func main() {
 	// Track every window we create so we can toggle visibility from
 	// the Window menu after a close.
 	var windows []*foxpro.Window
-	addWindow := func(title string, bounds foxpro.Rect, content foxpro.ContentProvider, minW, minH int) *foxpro.Window {
+	addWindow := func(tag, title string, bounds foxpro.Rect, content foxpro.ContentProvider, minW, minH int) *foxpro.Window {
 		w := foxpro.NewWindow(title, bounds, content)
+		w.Tag = tag
 		w.MinW = minW
 		w.MinH = minH
 		app.Manager.Add(w)
@@ -249,7 +251,10 @@ func main() {
 	}
 
 	cpuProv := &cpuwin.Provider{Backend: backend}
-	cpuWindow := addWindow(cpuTitle,
+	// Closure over currentCPU so the chip-body button auto-shows /
+	// hides on backend swap without a separate refresh path.
+	cpuProv.IsTransistorBackend = func() bool { return currentCPU == "netsim" }
+	cpuWindow := addWindow("cpu", cpuTitle,
 		layout.cpu,
 		cpuProv,
 		cpuwin.MinW, cpuwin.MinH)
@@ -265,7 +270,7 @@ func main() {
 		Symbols:      mergeSymbols(bootDemo.Symbols),
 		Annotations:  bootDemo.Annotations,
 	}
-	memWin := addWindow("Memory ($0000)",
+	memWin := addWindow("memory", "Memory ($0000)",
 		layout.ram,
 		ramProv,
 		ramwin.MinW, ramwin.MinH)
@@ -283,7 +288,7 @@ func main() {
 		Symbols:      mergeSymbols(bootDemo.Symbols),
 		Annotations:  bootDemo.Annotations,
 	}
-	romWin := addWindow("Memory · disasm ($E000 - $FFFF)",
+	romWin := addWindow("rom", "Memory · disasm ($E000 - $FFFF)",
 		layout.rom,
 		romProv,
 		ramwin.MinW, ramwin.MinH)
@@ -322,7 +327,7 @@ func main() {
 
 	viaProv := &viawin.Provider{VIA: via1, Base: viaBase}
 	viaTitle := fmt.Sprintf("VIA 1 — $%04X @ %s", viaBase, viawin.FormatHz(via1.CrystalHz()))
-	viaWin := addWindow(viaTitle,
+	viaWin := addWindow("via", viaTitle,
 		layout.via,
 		viaProv,
 		viawin.MinW, viawin.MinH)
@@ -338,7 +343,7 @@ func main() {
 	)
 	hubDirect := bridge.NewHubDirect(sharedHub)
 	mon := monitor.New(simHost, hubDirect)
-	monitorWin := addWindow("Monitor",
+	monitorWin := addWindow("monitor", "Monitor",
 		layout.monitor,
 		mon,
 		20, 5)
@@ -360,11 +365,63 @@ func main() {
 	// 128 cells of canvas. WASM: graphics-mode pixel overlay,
 	// 8 samples per cell → 1024 visible samples at high density.
 	scopeProv := scopewin.New(128, true)
-	scopeWin := addWindow("Logic Analyzer",
+	scopeWin := addWindow("scope", "Logic Analyzer",
 		layout.scope,
 		scopeProv,
 		scopewin.MinW, scopewin.MinH)
 	app.Manager.Remove(scopeWin) // start hidden; toggle adds it back
+
+	// Visual 6502 — live transistor-level chip view. Hidden by
+	// default; opened by clicking the "<< Visual 6502 >>" button
+	// inside the CPU widget's chip body. Phase 1 paints a
+	// placeholder / "switch CPU" hint; Phase 2 will overlay the
+	// segdefs polygons coloured by netsim node state.
+	visualProv := visualcpuwin.New()
+	visualProv.Backend = backend
+	visualProv.IsTransistorBackend = func() bool { return currentCPU == "netsim" }
+	visualWin := addWindow("visual", "Visual 6502 — click image to toggle overlay",
+		// Square-ish window sized for the eventual die rendering.
+		// Placed to overlap the scope's default slot; both start
+		// hidden so the user only sees the one they ask for.
+		foxpro.Rect{X: 10, Y: 2, W: 80, H: 30},
+		visualProv,
+		visualcpuwin.MinW, visualcpuwin.MinH)
+	app.Manager.Remove(visualWin) // start hidden; opens on button click
+
+	// 50 ms (~20 Hz) redraw heartbeat while the Visual 6502 window
+	// is open — same idle-refresh pattern as the scope. Without it
+	// the live overlay only updates on UI events; with the CPU
+	// stepping in the background you'd see stale wire state until
+	// you wiggled the mouse. Started / stopped by the click handler
+	// and the chrome ■ close.
+	var visualTick func()
+	startVisualTick := func() {
+		if visualTick != nil {
+			return
+		}
+		visualTick = app.Tick(50*time.Millisecond, nil)
+	}
+	stopVisualTick := func() {
+		if visualTick == nil {
+			return
+		}
+		visualTick()
+		visualTick = nil
+	}
+	visualWin.OnClose = func() {
+		app.Manager.Remove(visualWin)
+		stopVisualTick()
+	}
+
+	cpuProv.OnVisualClick = func() {
+		if app.Manager.Contains(visualWin) {
+			app.Manager.Raise(visualWin) // already open → bring forward
+			return
+		}
+		app.Manager.Add(visualWin)
+		app.Manager.Raise(visualWin)
+		startVisualTick()
+	}
 
 	// Scope-visible redraw heartbeat — 50 ms (~20 Hz). See
 	// cmd/6502-sim/main.go for why 30 Hz was too aggressive; the
@@ -485,7 +542,7 @@ func main() {
 		app.Manager.Add(w)
 	}
 	dispTitle := fmt.Sprintf("Video $%04X-$%04X", colorBase, ctrlBase+8)
-	dispWindow := addWindow(dispTitle,
+	dispWindow := addWindow("video", dispTitle,
 		layout.video,
 		dispProv,
 		displaywin.MinW, displaywin.MinH)
@@ -670,6 +727,7 @@ func main() {
 		cpuProv.Backend = newBackend
 		ramProv.Backend = newBackend
 		romProv.Backend = newBackend
+		visualProv.Backend = newBackend
 		// Re-tune MaxBatch for the new backend. Netsim is ~30x
 		// slower per cycle than interp, so reusing the previous
 		// batch size would spend the entire UI tick inside a single
@@ -679,9 +737,9 @@ func main() {
 		cpuWindow.Title = fmt.Sprintf("CPU (%s)", name)
 		// If the prior speed is above the new backend's plausible
 		// ceiling (e.g. switching from interp@1MHz to netsim, which
-		// caps near 26 kHz), drop to Max so the displayed speed
-		// matches what's actually delivered.
-		if limit := cpuMaxSettableHz(name); limit > 0 {
+		// caps near 6 kHz under wasm), drop to Max so the displayed
+		// speed matches what's actually delivered.
+		if limit := newBackend.MaxHz(); limit > 0 {
 			if cur := clockProv.Speed().Hz; cur != 0 && cur > limit {
 				clockProv.SetSpeedHz(0)
 			}
@@ -691,6 +749,185 @@ func main() {
 			sharedHub.CmdRun(0, 0)
 		}
 	}
+
+	// setWindowVisible is the single chokepoint for show/hide so the
+	// scope tick start/stop side effect happens consistently across
+	// the menu, the visual-button hook, and Quick Pick restore.
+	// Always raises on visible (even if already mounted) so callers
+	// can walk a list of windows in bottom-to-top order and have the
+	// accumulated raises produce the intended z-stack.
+	setWindowVisible := func(w *foxpro.Window, visible bool) {
+		contained := app.Manager.Contains(w)
+		if visible {
+			if !contained {
+				app.Manager.Add(w)
+				if w == scopeWin {
+					startScopeTick()
+				}
+			}
+			app.Manager.Raise(w)
+		} else if contained {
+			app.Manager.Remove(w)
+			if w == scopeWin {
+				stopScopeTick()
+			}
+		}
+	}
+	findWindowByTag := func(tag string) *foxpro.Window {
+		for _, w := range windows {
+			if w.Tag == tag {
+				return w
+			}
+		}
+		return nil
+	}
+
+	// Quick Pick presets — surfaced as buttons under the canvas via
+	// the JS bridge below. Each preset bundles a demo + CPU choice +
+	// clock speed (+ optional window layout); clicking dispatches
+	// onto the foxpro UI goroutine via app.Post so the mutations
+	// happen on the thread that owns the simulator state.
+	type windowSpec struct {
+		Tag           string
+		X, Y, W, H    int
+		Visible       bool
+	}
+	type quickPick struct {
+		Name    string // stable id (matches HTML data-name)
+		Label   string // human-readable button caption
+		Demo    demos.Demo
+		CPU     string
+		Hz      int
+		Windows []windowSpec // optional — empty leaves layout alone
+	}
+	quickPicks := []quickPick{
+		{Name: "marquee", Label: "Marquee · interp · 100 Hz", Demo: demos.MarqueeDemo, CPU: "interp", Hz: 100,
+			Windows: []windowSpec{
+				{Tag: "memory", X: 0, Y: 13, W: 78, H: 8, Visible: true},
+				{Tag: "cpu", X: 0, Y: 1, W: 78, H: 11, Visible: true},
+				{Tag: "video", X: 80, Y: 1, W: 44, H: 18, Visible: true},
+				{Tag: "monitor", X: 80, Y: 24, W: 78, H: 14, Visible: true},
+				{Tag: "rom", X: 0, Y: 22, W: 78, H: 16, Visible: true},
+				{Tag: "via", X: 44, Y: 1, W: 56, H: 16, Visible: false},
+				{Tag: "scope", X: 1, Y: 1, W: 139, H: 30, Visible: false},
+				{Tag: "visual", X: 10, Y: 2, W: 80, H: 30, Visible: false},
+			},
+		},
+		{Name: "balls", Label: "Bouncing Balls · interp · 1 MHz", Demo: demos.BouncingBallsDemo, CPU: "interp", Hz: 1_000_000,
+			Windows: []windowSpec{
+				{Tag: "memory", X: 0, Y: 13, W: 78, H: 8, Visible: true},
+				{Tag: "cpu", X: 0, Y: 1, W: 78, H: 11, Visible: true},
+				{Tag: "video", X: 80, Y: 1, W: 44, H: 18, Visible: true},
+				{Tag: "monitor", X: 80, Y: 24, W: 78, H: 14, Visible: true},
+				{Tag: "rom", X: 0, Y: 22, W: 78, H: 16, Visible: true},
+				{Tag: "via", X: 44, Y: 1, W: 56, H: 16, Visible: false},
+				{Tag: "scope", X: 1, Y: 1, W: 139, H: 30, Visible: false},
+				{Tag: "visual", X: 10, Y: 2, W: 80, H: 30, Visible: false},
+			},
+		},
+		{Name: "bouncer", Label: "Bouncer · netsim · 1 kHz", Demo: demos.BouncerDemo, CPU: "netsim", Hz: 1000,
+			Windows: []windowSpec{
+				{Tag: "cpu", X: 0, Y: 1, W: 78, H: 11, Visible: true},
+				{Tag: "memory", X: 0, Y: 13, W: 78, H: 8, Visible: true},
+				{Tag: "rom", X: 0, Y: 22, W: 78, H: 16, Visible: true},
+				{Tag: "via", X: 44, Y: 1, W: 56, H: 16, Visible: false},
+				{Tag: "monitor", X: 81, Y: 31, W: 76, H: 7, Visible: true},
+				{Tag: "scope", X: 1, Y: 1, W: 139, H: 30, Visible: false},
+				{Tag: "visual", X: 77, Y: 2, W: 80, H: 30, Visible: true},
+				{Tag: "video", X: 26, Y: 18, W: 44, H: 18, Visible: true},
+			},
+		},
+	}
+	applyPreset := func(name string) {
+		var qp *quickPick
+		for i := range quickPicks {
+			if quickPicks[i].Name == name {
+				qp = &quickPicks[i]
+				break
+			}
+		}
+		if qp == nil {
+			return
+		}
+		// Order: CPU first (so the speed clamp + reset happen with
+		// the right backend), then speed (clockProv carries the
+		// setpoint into loadDemo's wasRunning path), then demo
+		// (which Resets + re-CmdRuns if we were running), then
+		// layout (only addressed windows are touched; others keep
+		// their current position + visibility).
+		switchCPU(qp.CPU)
+		clockProv.SetSpeedHz(qp.Hz)
+		loadDemo(qp.Demo)
+		for _, ws := range qp.Windows {
+			w := findWindowByTag(ws.Tag)
+			if w == nil {
+				continue
+			}
+			w.Bounds = foxpro.Rect{X: ws.X, Y: ws.Y, W: ws.W, H: ws.H}
+			setWindowVisible(w, ws.Visible)
+		}
+	}
+	js.Global().Set("go6sim", js.ValueOf(map[string]any{
+		"quickPicks": js.FuncOf(func(this js.Value, args []js.Value) any {
+			out := make([]any, 0, len(quickPicks))
+			for _, qp := range quickPicks {
+				out = append(out, map[string]any{
+					"name":  qp.Name,
+					"label": qp.Label,
+				})
+			}
+			return js.ValueOf(out)
+		}),
+		"applyPreset": js.FuncOf(func(this js.Value, args []js.Value) any {
+			if len(args) == 0 {
+				return nil
+			}
+			name := args[0].String()
+			app.Post(func() { applyPreset(name) })
+			return nil
+		}),
+		// snapshot returns the current live state in the same JSON
+		// shape a Quick Pick preset accepts — design tool for adding
+		// new presets: configure the sim by hand, call
+		// window.go6sim.snapshot() in DevTools, paste the result
+		// into the quickPicks table.
+		"snapshot": js.FuncOf(func(this js.Value, args []js.Value) any {
+			// Order matters: visible windows are listed bottom-to-top
+			// in current z-order (Manager.AllWindows() is z-sorted
+			// with the front-most window last) so that restoring in
+			// list order — each Add/Raise pushes to top — reproduces
+			// the visible layering. Hidden windows tag onto the end;
+			// their relative order is irrelevant until shown.
+			seen := map[*foxpro.Window]bool{}
+			sw := make([]any, 0, len(windows))
+			addEntry := func(w *foxpro.Window, visible bool) {
+				sw = append(sw, map[string]any{
+					"tag":     w.Tag,
+					"title":   w.Title,
+					"x":       w.Bounds.X,
+					"y":       w.Bounds.Y,
+					"w":       w.Bounds.W,
+					"h":       w.Bounds.H,
+					"visible": visible,
+				})
+				seen[w] = true
+			}
+			for _, w := range app.Manager.AllWindows() {
+				addEntry(w, true)
+			}
+			for _, w := range windows {
+				if !seen[w] {
+					addEntry(w, false)
+				}
+			}
+			return js.ValueOf(map[string]any{
+				"cpu":     currentCPU,
+				"speedHz": clockProv.Speed().Hz,
+				"demo":    currentDemo,
+				"windows": sw,
+			})
+		}),
+	}))
 
 	windowItems := make([]foxpro.MenuItem, 0, len(windows))
 	for _, w := range windows {
@@ -742,7 +979,7 @@ func main() {
 				{Label: "&Reset", Hotkey: "Z", OnSelect: machineReset},
 				{Separator: true},
 				{Label: "&CPU...", OnSelect: func() { openCPUPicker(app, &currentCPU, switchCPU) }},
-				{Label: "&Speed...", OnSelect: func() { openSpeedPicker(app, clockProv, currentCPU) }},
+				{Label: "&Speed...", OnSelect: func() { openSpeedPicker(app, clockProv) }},
 			},
 		},
 		{
@@ -796,7 +1033,7 @@ func main() {
 				}
 				return sp.Label
 			},
-			OnClick: func() { openSpeedPicker(app, clockProv, currentCPU) },
+			OnClick: func() { openSpeedPicker(app, clockProv) },
 		},
 		{
 			Compute: func() string {
@@ -915,15 +1152,15 @@ func openDemoPicker(a *foxpro.App, current *string, loadDemo func(demos.Demo), a
 }
 
 // openSpeedPicker pops the Hardware → Speed... dialog. Speeds beyond
-// the current backend's plausible ceiling are filtered out — netsim
-// caps around 26 kHz, so offering 100 kHz / 1 MHz would just run at
-// netsim's max while the tray label lied. cpuMaxSettableHz is the
-// cutoff. Descriptions are intentionally omitted — labels are self-
-// evident, and the picker auto-collapses to a compact box.
-func openSpeedPicker(a *foxpro.App, clockProv *clockwin.Provider, currentCPU string) {
+// the active backend's MaxHz() ceiling are filtered out so the tray
+// label never lies — picking 1 MHz under netsim would just run at
+// netsim's real ceiling (~6 kHz under wasm) while pretending
+// otherwise. Descriptions are omitted — labels are self-evident and
+// the picker auto-collapses.
+func openSpeedPicker(a *foxpro.App, clockProv *clockwin.Provider) {
 	sw, sh := a.Screen.Size()
 	current := clockProv.Speed().Label
-	limit := cpuMaxSettableHz(currentCPU)
+	limit := clockProv.Backend.MaxHz()
 	opts := make([]dialog.Option, 0, len(clockwin.Speeds))
 	for _, sp := range clockwin.Speeds {
 		if sp.Hz != 0 && limit > 0 && sp.Hz > limit {
@@ -942,17 +1179,6 @@ func openSpeedPicker(a *foxpro.App, clockProv *clockwin.Provider, currentCPU str
 	}, nil, sw, sh)
 	w.OnClose = func() { a.Manager.Remove(w) }
 	a.Manager.Add(w)
-}
-
-// cpuMaxSettableHz returns the highest non-Max speed entry that
-// makes sense for the given backend. 0 = no cap (interp). Netsim
-// caps at 10 kHz: its real ceiling is around 26 kHz so 10 kHz is
-// achievable while 100 kHz / 1 MHz are not.
-func cpuMaxSettableHz(name string) int {
-	if name == "netsim" {
-		return 10000
-	}
-	return 0
 }
 
 func stripAccel(s string) string {

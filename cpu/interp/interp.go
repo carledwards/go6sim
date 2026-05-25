@@ -200,6 +200,11 @@ func (a *Adapter) Taps() []bus.Tap {
 	}
 }
 
+// MaxHz reports interp as uncapped. The Go interpreter dispatches each
+// 6502 instruction in tens of nanoseconds, so the realistic ceiling is
+// well above any rate the picker offers.
+func (a *Adapter) MaxHz() int { return 0 }
+
 var _ cpu.Backend = (*Adapter)(nil)
 
 // ---------- memory + flag helpers ----------

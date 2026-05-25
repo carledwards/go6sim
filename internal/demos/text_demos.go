@@ -84,6 +84,8 @@ func buildMarquee() asm.Program {
 
 // buildBouncer — single colored '*' bounces left-and-right across
 // row 6, erasing its trail. ZP[$10] = x, ZP[$11] = direction (+1/-1).
+// Pacing via VIA T1 free-run underflow so motion stays at ~20 hops/sec
+// independent of CPU clock — same pattern as Marquee / Bouncing Balls.
 func buildBouncer() asm.Program {
 	a := asm.New(0xE000)
 
@@ -91,6 +93,24 @@ func buildBouncer() asm.Program {
 	a.Comment("clear the screen").
 		LdaImm(CmdClear).
 		StaAbs(RegCmd)
+	a.Comment("pause — display only updates on RegFrame writes").
+		LdaImm(0x01).
+		StaAbs(RegPause)
+
+	// Program VIA T1 for ~50 ms free-run pacing.
+	// Latch = 50_000 = $C350, at 1 MHz VIA crystal → 50 ms period.
+	// Order matters: ACR=$40 (free-run) goes BEFORE T1C_H so T1
+	// arms straight into free-run mode and won't self-disarm.
+	a.Comment("ACR bit 6 = T1 free-run (auto-reload from latch)").
+		LdaImm(ViaT1Bit).
+		StaAbs(ViaACR)
+	a.Comment("VIA T1 latch low: $50 ($C350 = 50_000 → 50 ms @ 1 MHz)").
+		LdaImm(0x50).
+		StaAbs(ViaT1L_L)
+	a.Comment("VIA T1 latch high — arms T1 in free-run mode").
+		LdaImm(0xC3).
+		StaAbs(ViaT1C_H)
+
 	a.Comment("initial X = 20 (centre)").
 		LdxImm(20).
 		StxZP(0x10)
@@ -130,12 +150,21 @@ func buildBouncer() asm.Program {
 		LdaImm(0x1E).
 		StaAbsX(ColorBase + 240)
 
-	// Cycle delay so motion is visible at high clock speeds.
-	a.Comment("delay loop counter init").
-		LdyImm(0xFF)
-	a.Label("DELAY")
-	a.DEY()
-	a.BNE("DELAY")
+	// Commit the erase+draw as one atomic frame — without RegFrame
+	// the user sees the blank cell between the space-write and the
+	// star-write (visible blink at low CPU speeds).
+	a.Comment("RegFrame: any write captures a snapshot").
+		LdaImm(0x01).
+		StaAbs(RegFrame)
+
+	// Wait for VIA T1 underflow (~50 ms regardless of CPU speed).
+	a.Label("WAIT_TICK")
+	a.Comment("read IFR; T1 sets bit 6 on underflow").
+		LdaAbs(ViaIFR)
+	a.AndImm(ViaT1Bit).
+		BEQ("WAIT_TICK")
+	a.Comment("read T1C-L to clear IFR T1 — ready for next period").
+		LdaAbs(ViaT1C_L)
 
 	// Bounds: if X==0 or X==39, flip direction.
 	a.Comment("hit left wall?").

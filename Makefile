@@ -1,4 +1,4 @@
-.PHONY: build run tidy test clean wasm wasm-serve core-wasm core-smoke codelab-wasm codelab codelab-smoke
+.PHONY: build run tidy test clean wasm wasm-serve core-wasm core-smoke codelab-wasm codelab codelab-smoke host-wasm
 
 PORT       ?= 8765
 WEB        := web
@@ -8,6 +8,8 @@ GOASM_OUT  := $(WEB)/go6asm.wasm
 GOASM_DIR  ?= ../go6asm
 EXEC_OUT   := $(WEB)/wasm_exec.js
 FOXPRO_OUT := $(WEB)/foxpro.js
+HOST_DIR   := $(WEB)/cpu-host
+HOST_WASM  := $(HOST_DIR)/host.wasm
 GOROOT     := $(shell go env GOROOT)
 EXEC_SRC   := $(firstword $(wildcard $(GOROOT)/lib/wasm/wasm_exec.js $(GOROOT)/misc/wasm/wasm_exec.js))
 build:
@@ -96,6 +98,31 @@ codelab: codelab-wasm
 wasm-serve: wasm
 	@echo "serving $(WEB)/ at http://localhost:$(PORT)/  (hard-refresh the browser)"
 	@cd $(WEB) && python3 -m http.server $(PORT)
+
+# host-wasm — build the Remote-CPU host wasm (cmd/cpu-host-wasm) into
+# web/cpu-host/ alongside the same JS shims wasm-serve uses. The
+# files end up embedded into the TUI binary (web/cpu-host/embed.go)
+# so a subsequent `go build ./cmd/6502-sim` bakes the latest host
+# wasm into the TUI binary; then `./bin/6502-sim -cpu=remote
+# -remote-addr :7777` serves the host page + the /cpu WebSocket from
+# one port (open http://localhost:7777 in your browser).
+host-wasm:
+	@mkdir -p $(HOST_DIR)
+	GOOS=js GOARCH=wasm go build -o $(HOST_WASM) ./cmd/cpu-host-wasm
+	@if [ -z "$(EXEC_SRC)" ]; then \
+	  echo "ERROR: wasm_exec.js not found under $(GOROOT)/{lib,misc}/wasm/"; \
+	  exit 1; \
+	fi
+	@cp $(EXEC_SRC) $(HOST_DIR)/wasm_exec.js
+	@set -e; \
+	go mod download github.com/carledwards/foxpro-go; \
+	src="$$(go list -m -f '{{.Dir}}' github.com/carledwards/foxpro-go)/wasm/foxpro.js"; \
+	if [ ! -f "$$src" ]; then \
+	  echo "ERROR: foxpro.js not found at $$src"; \
+	  exit 1; \
+	fi; \
+	cp "$$src" $(HOST_DIR)/foxpro.js
+	@ls -lh $(HOST_WASM) | awk '{print "  built " $$NF " (" $$5 ")"}'
 
 tidy:
 	go mod tidy

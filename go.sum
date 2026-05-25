@@ -1,9 +1,11 @@
-github.com/carledwards/6502-netsim-go v0.1.2 h1:g5/LLIIIXf50xk3Bo6+4ldNeh6TFDqdxsU8/tM+AU2k=
-github.com/carledwards/6502-netsim-go v0.1.2/go.mod h1:k/L4UinTvGB5KikGh+LZCIClnXjtn7oLBDyhPct66+4=
-github.com/carledwards/foxpro-go v0.4.1 h1:oRsOLYiIerbxft8jQKw2Lc7QFT39GT5VPLxK5Y70hvM=
-github.com/carledwards/foxpro-go v0.4.1/go.mod h1:IcnDgILGxAuK0AMz6BBeXYLpmo4Np30v3jiogJOMoCI=
+github.com/carledwards/6502-netsim-go v0.2.0 h1:hE58c3FxvO24584Lf0uJIzhtGB8ZPlAndtRgrmiay2A=
+github.com/carledwards/6502-netsim-go v0.2.0/go.mod h1:k/L4UinTvGB5KikGh+LZCIClnXjtn7oLBDyhPct66+4=
+github.com/carledwards/foxpro-go v0.5.0 h1:jK+ejBr6hKCpxfpQam6x7atpk/K4SiIOTrmYM2YFp84=
+github.com/carledwards/foxpro-go v0.5.0/go.mod h1:IcnDgILGxAuK0AMz6BBeXYLpmo4Np30v3jiogJOMoCI=
 github.com/carledwards/go6asm v0.1.0 h1:Yocnc4KgN0q6BUwljBotVx1L7lh42CHv6mSWAUFP/Q0=
 github.com/carledwards/go6asm v0.1.0/go.mod h1:G1kCZnyiYh+PXbkFJpvSz+N8hM1FdPOLC+0MflRfOJk=
+github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
+github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/gdamore/encoding v1.0.0 h1:+7OoQ1Bc6eTm5niUzBa0Ctsh6JbMW6Ra+YNuAtDBdko=
 github.com/gdamore/encoding v1.0.0/go.mod h1:alR0ol34c49FCSBLjhosxzcPHQbf2trDkoo5dl+VrEg=
 github.com/gdamore/tcell/v2 v2.7.4 h1:sg6/UnTM9jGpZU+oFYAsDahfchWAFW8Xx2yFinNSAYU=

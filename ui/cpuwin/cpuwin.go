@@ -9,6 +9,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	foxpro "github.com/carledwards/foxpro-go"
+	"github.com/carledwards/foxpro-go/widgets"
 	"github.com/carledwards/go6sim/cpu"
 )
 
@@ -24,6 +25,26 @@ type Provider struct {
 	sampleHalf uint64
 	sampleTime time.Time
 	rate       float64 // smoothed half-cycles per second
+
+	// OnVisualClick fires on a completed click (press + release inside)
+	// on the "< Visual 6502 >" button. The host opens / raises a
+	// visualcpuwin window from this callback. Nil-safe.
+	OnVisualClick func()
+
+	// IsTransistorBackend, when non-nil and returning true, gates
+	// the "< Visual 6502 >" button into the chip body. When false
+	// (interp backend) the body shows plain "6502" — there's
+	// nothing for the visualizer to render so we don't dangle a
+	// dead button. Hosts that don't supply this callback get the
+	// button unconditionally (legacy / test path).
+	IsTransistorBackend func() bool
+
+	// visualBtnRect / visualPressed track the button state across
+	// HandleMouse → HandleMouseMotion → HandleMouseRelease via the
+	// MouseDragHandler interface. visualPressed flips the button to
+	// its focused style (inverted blue/cyan) for press-down feedback.
+	visualBtnRect foxpro.Rect
+	visualPressed bool
 }
 
 // Rate returns the most-recently-measured full-cycle rate in Hz.
@@ -125,10 +146,16 @@ func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.The
 		chipW = 22 // body width: 20 pin stubs + 2 borders
 	)
 	if inner.W >= chipX+chipW {
+		isTransistor := p.IsTransistorBackend != nil && p.IsTransistorBackend()
 		drawChip(c, theme, chipX, 1,
 			p.Backend.AddressBus(), p.Backend.DataBus(),
 			p.Backend.ReadCycle(), p.Backend.IRQ(), p.Backend.NMI(),
-			dLit, aLit, cLit)
+			dLit, aLit, cLit, inner,
+			screen, isTransistor, p.visualPressed, &p.visualBtnRect)
+	} else {
+		// Chip not rendered → button isn't visible; clear stale rect
+		// so an off-screen click can't trip the visual-toggle path.
+		p.visualBtnRect = foxpro.Rect{}
 	}
 
 	hc := p.Backend.HalfCycles()
@@ -147,6 +174,45 @@ func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.The
 		p.sampleHalf = hc
 	}
 	c.Put(0, 8, fmt.Sprintf("Rate:       %s", formatHz(p.rate/2)), style)
+}
+
+// HandleMouse + HandleMouseMotion + HandleMouseRelease implement the
+// standard foxpro "press → drag-off cancels → release-on commits"
+// pattern for the "< Visual 6502 >" button. Returning true on press
+// captures the cpu window as a MouseDragHandler so foxpro routes
+// subsequent motion / release back here without the user having to
+// hold focus.
+func (p *Provider) HandleMouse(ev *tcell.EventMouse, inner foxpro.Rect) bool {
+	if ev.Buttons()&tcell.Button1 == 0 {
+		return false
+	}
+	mx, my := ev.Position()
+	if !p.visualBtnRect.Contains(mx, my) {
+		return false
+	}
+	p.visualPressed = true
+	return true
+}
+
+// HandleMouseMotion (MouseDragHandler) — keep the button "armed"
+// while the cursor is still over the hit-rect, drop the armed
+// highlight if the user drags off. Matches displaywin's button feel
+// and the conventional desktop "drag off to cancel" gesture.
+func (p *Provider) HandleMouseMotion(ev *tcell.EventMouse, inner foxpro.Rect) {
+	mx, my := ev.Position()
+	p.visualPressed = p.visualBtnRect.Contains(mx, my)
+}
+
+// HandleMouseRelease (MouseDragHandler) — if the release lands while
+// still armed (cursor inside the hit-rect), fire OnVisualClick. The
+// pressed-flag is cleared regardless so the next paint shows the
+// button in its normal state.
+func (p *Provider) HandleMouseRelease(ev *tcell.EventMouse, inner foxpro.Rect) {
+	armed := p.visualPressed
+	p.visualPressed = false
+	if armed && p.OnVisualClick != nil {
+		p.OnVisualClick()
+	}
 }
 
 func (p *Provider) HandleKey(ev *tcell.EventKey) bool {
@@ -279,6 +345,9 @@ var (
 func drawChip(c *foxpro.Canvas, theme foxpro.Theme, x0, y0 int,
 	addr uint16, data uint8, rw, irq, nmi bool,
 	dLit, aLit, cLit tcell.Style,
+	inner foxpro.Rect,
+	screen tcell.Screen, isTransistor, pressed bool,
+	visualBtnRect *foxpro.Rect,
 ) {
 	bg := theme.WindowBG
 	chip := bg.Foreground(theme.Palette.White)
@@ -348,14 +417,60 @@ func drawChip(c *foxpro.Canvas, theme foxpro.Theme, x0, y0 int,
 	}
 	c.Set(x0+bodyW-1, bodyY, '┐', chip)
 
-	// ── Chip body middle row with "6502" label ─────────────────
+	// ── Chip body middle row. Two states:
+	//   isTransistor → "< Visual 6502 >" foxpro dialog button
+	//                  (blue-on-cyan, inverted to cyan-on-blue on
+	//                  press for real mouse-down feedback). Click
+	//                  opens the live transistor view.
+	//   else         → plain "6502" silkscreen text — the visualizer
+	//                  has nothing to render from interp, so we
+	//                  don't dangle a dead button.
 	c.Set(x0, bodyY+1, '│', chip)
 	for i := 1; i < bodyW-1; i++ {
 		c.Set(x0+i, bodyY+1, ' ', bg)
 	}
-	const label = "6502"
-	labelX := x0 + (bodyW-len(label))/2
-	c.Put(labelX, bodyY+1, label, bg)
+	if isTransistor {
+		const label = "Visual 6502"
+		// DrawDialogButton renders "< Label >" / "« Label »". Pick
+		// the single-chevron variant (defaultBtn=false). Width is
+		// len("< ") + label + len(" >") = 15 cells, fits the
+		// 20-cell inner span comfortably.
+		const btnW = len("< ") + len("Visual 6502") + len(" >")
+		btnX := x0 + (bodyW-btnW)/2
+		// Blue-on-cyan normal; cyan-on-blue when pressed — same
+		// "inverted highlight" pattern foxpro uses for focused
+		// dialog buttons against the magenta dialog body.
+		normal := bg.Foreground(theme.Palette.Blue)
+		focus := tcell.StyleDefault.
+			Background(theme.Palette.Blue).
+			Foreground(theme.Palette.Cyan)
+		// Screen coords for DrawDialogButton — it writes directly
+		// to screen, not through the Canvas (no scroll translation
+		// needed because the cpu window doesn't scroll).
+		screenX := inner.X + btnX
+		screenY := inner.Y + bodyY + 1
+		widgets.DrawDialogButton(screen, screenX, screenY,
+			"Visual 6502", false, pressed, normal, focus)
+		if visualBtnRect != nil {
+			*visualBtnRect = foxpro.Rect{
+				X: screenX,
+				Y: screenY,
+				W: btnW,
+				H: 1,
+			}
+		}
+	} else {
+		const label = "6502"
+		labelX := x0 + (bodyW-len(label))/2
+		c.Put(labelX, bodyY+1, label, bg)
+		if visualBtnRect != nil {
+			*visualBtnRect = foxpro.Rect{} // no button → no hit-rect
+		}
+	}
+	// Right chip border for the middle row. Drawn AFTER the body
+	// content so it isn't clobbered by the spaces fill (which writes
+	// cols 1..bodyW-2) or by DrawDialogButton (which is centered well
+	// inside the inner span).
 	c.Set(x0+bodyW-1, bodyY+1, '│', chip)
 
 	// ── Chip bottom edge: 20 pin stubs in white ────────────────
