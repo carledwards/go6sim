@@ -45,16 +45,20 @@ const pixelPlaceholderRune = ''
 const (
 	rightStripCells = 9
 	rowsClk         = 1
+	rowsCtrl        = 3 // R/W, IRQ, NMI — control-line lanes below CLK
 	rowsAddr        = 16
 	rowGap          = 1
 	rowsData        = 8
-	totalRows       = rowsClk + rowsAddr + rowGap + rowsData
+	totalRows       = rowsClk + rowsCtrl + rowsAddr + rowGap + rowsData
 	topMargin       = 1
 
 	// Layout offsets within the trace area (relative to the first
 	// trace row, NOT including topMargin).
 	clkRow0  = 0
-	addrRow0 = clkRow0 + rowsClk
+	rwRow0   = clkRow0 + rowsClk     // R/W
+	irqRow0  = rwRow0 + 1            // IRQ
+	nmiRow0  = irqRow0 + 1           // NMI
+	addrRow0 = clkRow0 + rowsClk + rowsCtrl
 	dataRow0 = addrRow0 + rowsAddr + rowGap
 
 	// pxPerCell — graphics-mode pixels per cell (= the wasm
@@ -94,6 +98,14 @@ type Sample struct {
 	// instruction's first cycle is now in flight). Used to color
 	// the CLK row's pulse so instruction boundaries are visible.
 	InstrEdge bool
+	// Control-line samples — captured per half-cycle alongside the
+	// bus pins. Each renders as a "bar when HIGH" row, same idiom
+	// as the address / data rows. RW is the literal pin (HIGH=read);
+	// IRQ and NMI are also literal-pin (HIGH=line not asserted; LOW=
+	// asserted, since both are active-low signals).
+	RW  bool
+	IRQ bool
+	NMI bool
 }
 
 // Provider renders one logic-analyzer scope window.
@@ -125,6 +137,15 @@ type Provider struct {
 	filled      bool // false until ring has wrapped at least once
 	skip        int  // decimation counter
 	pendingEdge bool // an instr-edge that arrived during a decimated skip
+
+	// lastCanvasCols is the trace-area width painted by the most
+	// recent Draw, in cells. PixelRect returns this so the wasm
+	// bridge's pixel-substitution scan only inspects cells that
+	// actually belong to this window — without it the scan extends
+	// p.Width cells past the scope's right edge and can hit the
+	// PIXEL_SENTINEL rune in adjacent windows (e.g. the VIC display
+	// next door), painting scope trace pixels on top of them.
+	lastCanvasCols int
 }
 
 // New returns a Provider with the given canvas cell-width. Set
@@ -149,32 +170,51 @@ func New(cellWidth int, useGraphics bool) *Provider {
 	}
 }
 
-// Capture pushes one sample into the ring. Honors Decimate.
+// Capture pushes one sample into the ring. Honors Decimate unless
+// force is true (single-stepping path: bypass decimation so every
+// stepped half-cycle lands in the buffer — the speed-based decimate
+// throttle is only meaningful when the clock is free-running at
+// high Hz, where the ring would otherwise overwrite faster than
+// the eye can track).
 // instrEdge marks the half-cycle where an instruction just
 // completed (PC tick), used by the CLK row's color highlight.
-func (p *Provider) Capture(addr uint16, data uint8, instrEdge bool) {
+// rw / irq / nmi are the live pin states sampled this half-cycle;
+// they feed the three control-line lanes below CLK.
+func (p *Provider) Capture(addr uint16, data uint8, instrEdge, rw, irq, nmi, force bool) {
 	p.mu.Lock()
-	div := p.Decimate
-	if div < 1 {
-		div = 1
-	}
-	p.skip++
-	if p.skip < div {
-		// Even when we skip, propagate any instr-edge through to
-		// the next captured sample so the highlight isn't lost
-		// to decimation.
-		if instrEdge {
-			p.pendingEdge = true
+	if !force {
+		div := p.Decimate
+		if div < 1 {
+			div = 1
 		}
-		p.mu.Unlock()
-		return
+		p.skip++
+		if p.skip < div {
+			// Even when we skip, propagate any instr-edge through to
+			// the next captured sample so the highlight isn't lost
+			// to decimation. (Saturates the CLK row at very high
+			// decimate — the Draw path gates the whole trace behind
+			// a "set clock to 10 kHz or lower" message above that
+			// threshold, so this can stay aggressive.)
+			if instrEdge {
+				p.pendingEdge = true
+			}
+			p.mu.Unlock()
+			return
+		}
+		p.skip = 0
 	}
-	p.skip = 0
 	if p.pendingEdge {
 		instrEdge = true
 		p.pendingEdge = false
 	}
-	p.buf[p.head] = Sample{Addr: addr, Data: data, InstrEdge: instrEdge}
+	p.buf[p.head] = Sample{
+		Addr:      addr,
+		Data:      data,
+		InstrEdge: instrEdge,
+		RW:        rw,
+		IRQ:       irq,
+		NMI:       nmi,
+	}
 	p.head++
 	if p.head >= len(p.buf) {
 		p.head = 0
@@ -216,12 +256,38 @@ func (p *Provider) last() Sample {
 func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.Theme, focused bool) {
 	bg := theme.WindowBG
 	dim := bg.Foreground(theme.Palette.DarkGray)
-	hex := bg.Foreground(theme.Palette.Yellow)
-	addr := bg.Foreground(theme.Palette.LightGreen)
-	data := bg.Foreground(theme.Palette.LightBlue)
+	// Trace-row pens — chosen to read well as ● dots on the cyan
+	// window bg, with the CPU chip widget's colour vocabulary kept
+	// in mind for filled hex-readout cells below:
+	//   address = LightBlue dots / Blue-bg-white-fg hex
+	//   data    = Yellow dots / Yellow-bg-black-fg hex
+	//   control = White dots
+	// CLK and data both use yellow, but they sit in opposite halves
+	// of the trace (CLK at top, data after a gap below address) so
+	// they don't compete.
+	addr := bg.Foreground(theme.Palette.LightBlue)
+	data := bg.Foreground(theme.Palette.Yellow)
+	ctrl := bg.Foreground(theme.Palette.White)
+	addrHex := bg.Background(theme.Palette.Blue).Foreground(theme.Palette.White)
+	dataHex := bg.Background(theme.Palette.Yellow).Foreground(theme.Palette.Black)
 	c := foxpro.NewCanvas(screen, inner, &p.ScrollState)
 
-	canvasCols := p.Width
+	// Legend follows the visible window: separator + labels + hex
+	// strip always sit at the right edge of the inner rect. In cell
+	// mode the trace can extend as wide as the user drags the
+	// window — the roll renderer just leaves the leftmost columns
+	// blank when the sample buffer isn't deep enough. Graphics mode
+	// (wasm pixel overlay) is capped at p.Width because the pixel
+	// buffer itself is sized at construction; beyond that, sentinel
+	// runes would have no pixel data underneath them.
+	canvasCols := inner.W - rightStripCells
+	if p.UseGraphics && canvasCols > p.Width {
+		canvasCols = p.Width
+	}
+	if canvasCols < 1 {
+		canvasCols = 1
+	}
+	p.lastCanvasCols = canvasCols // PixelRect reads this — see field doc
 	sepCol := canvasCols
 	labelCol := canvasCols + 1
 	hexCol := canvasCols + 5
@@ -238,8 +304,11 @@ func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.The
 		c.Put(x, 0, "─", dim)
 	}
 
-	// CLK label (top trace row).
+	// CLK + control-line labels (top trace rows).
 	c.Put(labelCol, topMargin+clkRow0, "CLK", bg)
+	c.Put(labelCol, topMargin+rwRow0, "R/W", bg)
+	c.Put(labelCol, topMargin+irqRow0, "IRQ", bg)
+	c.Put(labelCol, topMargin+nmiRow0, "NMI", bg)
 
 	// Address labels.
 	for i := 0; i < rowsAddr; i++ {
@@ -262,7 +331,6 @@ func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.The
 	p.mu.Lock()
 	bufN := len(p.buf)
 	hasSample := p.filled || p.head > 0
-	startIdx := p.head
 	headIdx := p.head
 	bufCopy := make([]Sample, bufN)
 	copy(bufCopy, p.buf)
@@ -272,9 +340,49 @@ func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.The
 	// Hex readouts of the most recent sample.
 	addrHi := byte(latest.Addr >> 8)
 	addrLo := byte(latest.Addr & 0xFF)
-	c.Put(hexCol, topMargin+addrRow0+3, fmt.Sprintf("$%02X", addrHi), hex)
-	c.Put(hexCol, topMargin+addrRow0+11, fmt.Sprintf("$%02X", addrLo), hex)
-	c.Put(hexCol, topMargin+dataRow0+3, fmt.Sprintf("$%02X", latest.Data), hex)
+	c.Put(hexCol, topMargin+addrRow0+3, fmt.Sprintf("$%02X", addrHi), addrHex)
+	c.Put(hexCol, topMargin+addrRow0+11, fmt.Sprintf("$%02X", addrLo), addrHex)
+	c.Put(hexCol, topMargin+dataRow0+3, fmt.Sprintf("$%02X", latest.Data), dataHex)
+
+	// Above ~12.5% sampling (Decimate > 8 → CPU > 10 kHz, or Max)
+	// the trace becomes too sparse to read meaningfully: short
+	// instructions disappear between captured frames, edge markers
+	// saturate, and what does land doesn't read as continuous bus
+	// activity. Paint a hint in the trace area and skip the dots
+	// rather than show a misleading picture. Chrome (labels, hex
+	// readouts, separator) stays so the user can still see the
+	// current bus values.
+	if div > 8 {
+		const hint1 = " Trace too sparse at this clock speed "
+		const hint2 = " Set clock to 10 kHz or lower "
+		// Blue background, white text — matches the address-bus
+		// hex-readout pen so the hint reads as part of the same
+		// scope vocabulary.
+		hintStyle := bg.Background(theme.Palette.Blue).Foreground(theme.Palette.White)
+		boxW := len(hint1)
+		if len(hint2) > boxW {
+			boxW = len(hint2)
+		}
+		boxX := (canvasCols - boxW) / 2
+		if boxX < 0 {
+			boxX = 0
+		}
+		msgY := topMargin + addrRow0 + (rowsAddr / 2)
+		// Four-row blue box: top padding, hint1, hint2, bottom padding.
+		// Pad each printed line to boxW so the bg fill is uniform.
+		pad := func(s string) string {
+			for len(s) < boxW {
+				s += " "
+			}
+			return s
+		}
+		for dy := -1; dy <= 2; dy++ {
+			c.Put(boxX, msgY+dy, pad(""), hintStyle)
+		}
+		c.Put(boxX, msgY, pad(hint1), hintStyle)
+		c.Put(boxX, msgY+1, pad(hint2), hintStyle)
+		return
+	}
 
 	if p.UseGraphics {
 		// Graphics mode: stamp sentinels across the canvas region.
@@ -292,28 +400,51 @@ func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.The
 	if !hasSample {
 		return
 	}
-	clkPulse := bg.Foreground(theme.Palette.Cyan)
-	clkEdge := bg.Foreground(theme.Palette.Yellow)
+	// CLK pulse = white dot on cyan; instruction-edge = orange dot
+	// on cyan. Both are foreground-only (no background block) so the
+	// CLK row reads as a uniform stream of pulses with the orange
+	// dots marking instruction boundaries.
+	clkPulse := bg.Foreground(theme.Palette.White)
+	clkEdge := bg.Foreground(theme.Palette.Brown)
+
+	// Roll-mode alignment: newest sample lands on the rightmost visible
+	// column. When the buffer holds more samples than fit on screen, we
+	// trim the OLDEST ones (off the left edge). When it holds fewer,
+	// the leftmost columns stay blank — the trace grows in from the
+	// right as samples arrive.
+	samplesAvail := bufN
+	if !p.filled {
+		samplesAvail = headIdx
+	}
 	for col := 0; col < canvasCols; col++ {
-		var idx int
-		if p.filled {
-			idx = (startIdx + col) % bufN
-		} else {
-			if col >= headIdx {
-				continue
-			}
-			idx = col
+		// cyclesAgo: 0 = newest, larger = older. Newest on the right.
+		cyclesAgo := canvasCols - 1 - col
+		if cyclesAgo >= samplesAvail {
+			continue // not enough samples yet — leave this column blank
 		}
+		idx := (headIdx - 1 - cyclesAgo + bufN) % bufN
 		s := bufCopy[idx]
 
 		// CLK row — one tick per sample, bright color on
-		// instruction-edge captures. Stays put as the trace
-		// scrolls (no visible-column alternation).
+		// instruction-edge captures.
 		st := clkPulse
 		if s.InstrEdge {
 			st = clkEdge
 		}
 		c.Put(col, topMargin+clkRow0, dotRune, st)
+
+		// Control-line rows — drawn in white when HIGH. Active-low
+		// signals (IRQ, NMI) read as "lit when not asserted"; that's
+		// the literal pin state per the user's request.
+		if s.RW {
+			c.Put(col, topMargin+rwRow0, dotRune, ctrl)
+		}
+		if s.IRQ {
+			c.Put(col, topMargin+irqRow0, dotRune, ctrl)
+		}
+		if s.NMI {
+			c.Put(col, topMargin+nmiRow0, dotRune, ctrl)
+		}
 
 		for r := 0; r < rowsAddr; r++ {
 			bit := uint(rowsAddr - 1 - r)
@@ -352,12 +483,20 @@ func (p *Provider) PixelSize() (int, int) {
 
 // PixelRect places the canvas at the LEFT of the inner area; the
 // label + hex strip sits to the right. Coords inner-relative.
+// Width is the most recently painted trace-area cell count (NOT
+// the underlying p.Width buffer length) so the wasm bridge's
+// pixel-substitution loop doesn't scan past this window's right
+// edge into adjacent windows that may also stamp PIXEL_SENTINEL.
 func (p *Provider) PixelRect() (x, y, w, h int) {
 	if !p.UseGraphics {
 		return 0, 0, 0, 0
 	}
 	sx, sy := p.ScrollOffset()
-	return 0 - sx, topMargin - sy, p.Width, totalRows
+	w = p.lastCanvasCols
+	if w <= 0 {
+		w = p.Width // first frame before Draw has run
+	}
+	return 0 - sx, topMargin - sy, w, totalRows
 }
 
 // DrawPixels renders the trace into a flat RGBA buffer (4 bytes per
@@ -372,8 +511,10 @@ func (p *Provider) DrawPixels(buf []byte) {
 
 	// Background — dim navy for that DOS-scope feel.
 	bgR, bgG, bgB := byte(0x00), byte(0x10), byte(0x20)
-	addrR, addrG, addrB := byte(0x40), byte(0xff), byte(0x88) // green
-	dataR, dataG, dataB := byte(0x60), byte(0x90), byte(0xff) // blue
+	// Row pen colours match the cell-mode renderer:
+	//   address = light blue, data = yellow.
+	addrR, addrG, addrB := byte(0x60), byte(0x90), byte(0xff) // light blue
+	dataR, dataG, dataB := byte(0xff), byte(0xff), byte(0x55) // yellow
 
 	for i := 0; i < pxW*pxH; i++ {
 		buf[4*i+0] = bgR
@@ -442,8 +583,9 @@ func (p *Provider) DrawPixels(buf []byte) {
 	// keyed off sample identity, NOT visible-column index, so
 	// yellow markers don't drift in/out as the trace scrolls.
 	clkY := clkRow0 * pxPerRow
-	clkPulseR, clkPulseG, clkPulseB := byte(0x60), byte(0xc0), byte(0xc0)
-	clkEdgeR, clkEdgeG, clkEdgeB := byte(0xff), byte(0xd0), byte(0x40)
+	// CLK pulse = white on cyan; instruction-edge = orange on cyan.
+	clkPulseR, clkPulseG, clkPulseB := byte(0xff), byte(0xff), byte(0xff)
+	clkEdgeR, clkEdgeG, clkEdgeB := byte(0xff), byte(0xa0), byte(0x40)
 	for s := 0; s < bufN; s++ {
 		idx, ok := indexFor(s)
 		if !ok {
@@ -463,6 +605,13 @@ func (p *Provider) DrawPixels(buf []byte) {
 		}
 		fillRun(buf, pxW, s*pxPerSample, clkY, w, r2, g2, b2)
 	}
+
+	// Control-line lanes — white when HIGH, matching the cell-mode
+	// renderer's white-on-bg pen.
+	ctrlR, ctrlG, ctrlB := byte(0xff), byte(0xff), byte(0xff)
+	drawRow(rwRow0*pxPerRow, func(s Sample) bool { return s.RW }, ctrlR, ctrlG, ctrlB)
+	drawRow(irqRow0*pxPerRow, func(s Sample) bool { return s.IRQ }, ctrlR, ctrlG, ctrlB)
+	drawRow(nmiRow0*pxPerRow, func(s Sample) bool { return s.NMI }, ctrlR, ctrlG, ctrlB)
 
 	for r := 0; r < rowsAddr; r++ {
 		bit := uint(rowsAddr - 1 - r)

@@ -106,6 +106,16 @@ func (i *Instrument) RunUntil(maxHalf int) RunResult {
 
 	for n := 0; n < maxHalf; n++ {
 		be.HalfStep()
+		// Fire the Driver's OnHalfStep observer — same callback the
+		// driver's own halfStep wrapper invokes for Advance / StepOne /
+		// StepInstruction. RunUntil bypasses that wrapper for efficiency
+		// (one less indirection per cycle in the hot loop), but the
+		// scope window relies on the callback to ring-buffer per-cycle
+		// bus state. Without this, the scope only updates during single-
+		// step, never during free-run.
+		if i.drv.OnHalfStep != nil {
+			i.drv.OnHalfStep()
+		}
 		if i.brkOnVec && brkRead != nil && brkRead() != prevBrk {
 			return RunResult{uint64(n + 1), "vector", be.Registers().PC}
 		}

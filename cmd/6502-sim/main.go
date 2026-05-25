@@ -98,6 +98,46 @@ func autoTune(backend cpu.Backend, budget time.Duration) int {
 
 const tickPeriod = 50 * time.Millisecond
 
+// winLayout is the single source of truth for the TUI's window
+// rectangles. Centralised here rather than scattered through main() so
+// repositioning is a one-spot edit and overlap risks are easier to
+// audit at a glance. Mirrors the wasm host's winLayout pattern.
+//
+// videoCollapsedW/H are the Video window's dimensions when the
+// "[ ] Expanded view" checkbox is unchecked — just framebuffer + the
+// toggle row. video.W/H are the expanded dimensions (Status + Mode +
+// buttons grid).
+type winLayout struct {
+	cpu     foxpro.Rect
+	ram     foxpro.Rect
+	rom     foxpro.Rect
+	via     foxpro.Rect
+	monitor foxpro.Rect
+	scope   foxpro.Rect
+	video   foxpro.Rect
+
+	videoCollapsedW int
+	videoCollapsedH int
+}
+
+// tuiLayout returns the TUI host's window arrangement. Sized for a
+// typical 140×40 terminal; smaller terminals still work because most
+// windows are draggable and many start hidden (VIA, ROM, Monitor,
+// Scope) — visible-by-default fits roughly 100×24.
+func tuiLayout() winLayout {
+	return winLayout{
+		cpu:             foxpro.Rect{X: 0, Y: 1, W: 76, H: 11},
+		ram:             foxpro.Rect{X: 0, Y: 13, W: 76, H: 8},
+		rom:             foxpro.Rect{X: 0, Y: 22, W: 76, H: 15},
+		via:             foxpro.Rect{X: 2, Y: 13, W: 56, H: 18},
+		monitor:         foxpro.Rect{X: 78, Y: 24, W: 71, H: 13},
+		scope:           foxpro.Rect{X: 1, Y: 1, W: 80, H: 32},
+		video:           foxpro.Rect{X: 78, Y: 1, W: 71, H: 22},
+		videoCollapsedW: 44,
+		videoCollapsedH: 18,
+	}
+}
+
 func main() {
 	// Defaults are tuned for "open the TUI, see the demo running".
 	// Interp is fast enough to make the marquee look alive without
@@ -105,7 +145,7 @@ func main() {
 	// transistor-level backend for visualization.
 	cpuFlag := flag.String("cpu", "interp", "CPU backend: interp or netsim")
 	runFlag := flag.Bool("run", true, "start the clock running immediately (default true)")
-	speedFlag := flag.String("speed", "max", "starting clock speed: 1, 10, 100, 1k (or 1000), max")
+	speedFlag := flag.String("speed", "max", "starting clock speed: 1, 10, 20, 100, 1k (or 1000), max")
 	batchFlag := flag.Int("batch", 0, "max HalfSteps per UI tick (0 = auto-tune at startup based on the chosen backend)")
 	cpuProfile := flag.String("cpuprofile", "", "write CPU profile to file (active for the lifetime of the process)")
 	memProfile := flag.String("memprofile", "", "write heap profile to file at exit")
@@ -143,6 +183,9 @@ func main() {
 	// have been touched recently. The inner bus is what the memory
 	// viewer's display reads use, so its own polling doesn't pollute
 	// the trace.
+	// Window placement table — see tuiLayout / winLayout above.
+	layout := tuiLayout()
+
 	bp := backplane.New()
 	innerBus := bp.Trace().Inner() // raw bus: untraced provider reads + Components()
 	b := bp                        // the backplane (IS bus.Bus + Tick + Attach)
@@ -252,8 +295,11 @@ func main() {
 	}
 
 	cpuProv := &cpuwin.Provider{Backend: backend}
+	// CPU width matches Memory below so the chip widget has room to
+	// draw — drawChip needs inner W ≥ 64 for its 22-cell footprint
+	// alongside the register + bus columns.
 	cpuWindow := addWindow(cpuTitle,
-		foxpro.Rect{X: 2, Y: 1, W: 38, H: 11},
+		layout.cpu,
 		cpuProv,
 		cpuwin.MinW, cpuwin.MinH)
 
@@ -268,8 +314,10 @@ func main() {
 		Symbols:      mergeSymbols(bootDemo.Symbols),
 		Annotations:  bootDemo.Annotations,
 	}
+	// Compact memory pane — ~4 data rows + header + edit row visible
+	// at layout.ram's H; scroll for more.
 	memWin := addWindow("RAM",
-		foxpro.Rect{X: 42, Y: 1, W: 76, H: 14},
+		layout.ram,
 		ramProv,
 		ramwin.MinW, ramwin.MinH)
 	ramProv.Window = memWin
@@ -287,7 +335,7 @@ func main() {
 		Annotations:  bootDemo.Annotations,
 	}
 	romWin := addWindow("ROM",
-		foxpro.Rect{X: 42, Y: 16, W: 76, H: 8},
+		layout.rom,
 		romProv,
 		ramwin.MinW, ramwin.MinH)
 	romProv.Window = romWin
@@ -359,8 +407,8 @@ func main() {
 	// blank separator) so the chip's body fits a smaller pane and
 	// the window can move up under the CPU pane.
 	viaTitle := fmt.Sprintf("VIA 1 — $%04X @ %s", viaBase, viawin.FormatHz(via1.CrystalHz()))
-	addWindow(viaTitle,
-		foxpro.Rect{X: 2, Y: 13, W: 56, H: 18},
+	viaWin := addWindow(viaTitle,
+		layout.via,
 		viaProv,
 		viawin.MinW, viawin.MinH)
 
@@ -383,13 +431,9 @@ func main() {
 	// since toggling it on already Raises it above whatever's
 	// underneath.
 	monitorWin := addWindow("Monitor",
-		foxpro.Rect{X: 10, Y: 8, W: 80, H: 20},
+		layout.monitor,
 		mon,
 		20, 5)
-	// Hide by default — the sim TUI is already screen-dense; users
-	// pop it via the View menu when they want REPL access. Same
-	// pattern the Scope window uses below.
-	app.Manager.Remove(monitorWin)
 	mon.AddEvent("system", "Monitor opened (in-process target)")
 	mon.AddEvent("system", "type 'help' or '?' for commands")
 	// Consume HubDirect notifications and forward to the Monitor's
@@ -403,19 +447,85 @@ func main() {
 	// region is blank (no graphics overlay); the cell-rendered
 	// label strip is still useful as a placeholder.
 	// TUI has no graphics layer; cell-mode (one sample per cell).
-	scopeProv := scopewin.New(128, false)
+	// Buffer width = 512 samples so a wide TUI window (140+ cols)
+	// can grow beyond the default cell count and reveal more history
+	// instead of bottoming out at empty left-padding. 512 samples ×
+	// 24 bytes ≈ 12 KB — negligible memory for the visibility win.
+	scopeProv := scopewin.New(512, false)
 	scopeWin := addWindow("Logic Analyzer",
-		foxpro.Rect{X: 1, Y: 1, W: 139, H: 30},
+		layout.scope,
 		scopeProv,
 		scopewin.MinW, scopewin.MinH)
 	app.Manager.Remove(scopeWin)
 
+	// Scope-visible redraw heartbeat. Foxpro paints on every input
+	// event plus the app.Tick (50 ms when idle); piggy-back a
+	// dedicated 50 ms tick of our own so the scope keeps refreshing
+	// at the same cadence whether or not the user is wiggling the
+	// mouse. Faster than 50 ms (e.g. 33 ms ≈ 30 Hz) was tried but
+	// the extra full-app redraws cost enough queryMu contention to
+	// visibly slow the Pump's CPU throughput.
+	var scopeTick func()
+	startScopeTick := func() {
+		if scopeTick != nil {
+			return
+		}
+		scopeTick = app.Tick(50*time.Millisecond, nil)
+	}
+	stopScopeTick := func() {
+		if scopeTick == nil {
+			return
+		}
+		scopeTick()
+		scopeTick = nil
+	}
+	// Wired below into the Window-menu toggle. The chrome close
+	// (■) calls scopeWin.OnClose; intercept it to also stop the tick.
+	scopeWin.OnClose = func() {
+		app.Manager.Remove(scopeWin)
+		stopScopeTick()
+	}
+
+	// VIA window hidden by default — mirrors
+	// the wasm host's defaults: the Monitor + the compact CPU/Memory
+	// panes are the everyday view; VIA internals and disasm are
+	// "advanced" views one menu click away.
+	app.Manager.Remove(viaWin)
+
 	prevSync := false
+	// scopeWasTooFast tracks the previous Decimate-too-high state so
+	// we can Reset the ring buffer the instant the clock drops back
+	// below the threshold — otherwise stale junk left in the buffer
+	// from the high-Hz regime would scroll past for ~256 ms before
+	// fresh samples replace it.
+	scopeWasTooFast := false
 	clockProv.OnHalfStep = func() {
+		// Hidden scope: don't pay the lock + buf-write for samples
+		// nobody can see. Buffer "starts fresh" on next reopen.
+		if !app.Manager.Contains(scopeWin) {
+			return
+		}
+		// Too-fast regime: Capture is gated AND we clear the ring
+		// once on the transition back down so the trace grows in
+		// from the right with only meaningful samples.
+		tooFast := scopeProv.Decimate > 8
+		if tooFast {
+			scopeWasTooFast = true
+			return
+		}
+		if scopeWasTooFast {
+			scopeProv.Reset()
+			scopeWasTooFast = false
+		}
 		s := backend.SYNC()
 		edge := s && !prevSync
 		prevSync = s
-		scopeProv.Capture(backend.AddressBus(), backend.DataBus(), edge)
+		// force=true when the clock isn't free-running: single-step
+		// fires only a handful of half-cycles per `s` press, so the
+		// speed-based Decimate throttle would swallow them entirely.
+		scopeProv.Capture(backend.AddressBus(), backend.DataBus(), edge,
+			backend.ReadCycle(), backend.IRQ(), backend.NMI(),
+			!clockProv.Running())
 	}
 
 	// machineReset = full simulated-machine restart: drop VIC pause,
@@ -483,10 +593,31 @@ func main() {
 		app.Manager.Add(w)
 	}
 	dispTitle := fmt.Sprintf("Video $%04X-$%04X", colorBase, ctrlBase+6)
-	addWindow(dispTitle,
-		foxpro.Rect{X: 60, Y: 1, W: 77, H: 22},
+	dispWindow := addWindow(dispTitle,
+		layout.video,
 		dispProv,
 		displaywin.MinW, displaywin.MinH)
+	dispProv.Window = dispWindow
+
+	// Video starts collapsed: just the framebuffer + the "[ ] Expanded
+	// view" toggle row, no Status/Mode picker, no buttons grid. The
+	// checkbox in the framebuffer's bottom row toggles between the
+	// collapsed and expanded geometries — layout.video.{W,H} hold the
+	// expanded values, layout.videoCollapsed{W,H} the collapsed ones.
+	expandedVideoW := layout.video.W
+	expandedVideoH := layout.video.H
+	dispWindow.Bounds.W = layout.videoCollapsedW
+	dispWindow.Bounds.H = layout.videoCollapsedH
+	dispProv.Expanded = false
+	dispProv.OnToggleExpanded = func() {
+		if dispProv.Expanded {
+			dispWindow.Bounds.W = expandedVideoW
+			dispWindow.Bounds.H = expandedVideoH
+		} else {
+			dispWindow.Bounds.W = layout.videoCollapsedW
+			dispWindow.Bounds.H = layout.videoCollapsedH
+		}
+	}
 
 	// Run loop. App.Tick fires on the UI thread, so simulator
 	// advancement, register reads, and bus reads all serialize
@@ -580,8 +711,11 @@ func main() {
 	// machine. Preserves the running state — if the clock was
 	// running before, the new demo starts running immediately.
 	loadDemo := func(d demos.Demo) {
+		// Hub owns execution — go through CmdStop / CmdRun, not
+		// clockProv.SetRunning (which only flips the driver flag and
+		// leaves the Pump in whatever state it was in).
 		wasRunning := clockProv.Running()
-		clockProv.SetRunning(false)
+		sharedHub.CmdStop()
 		// Resume the VIC so a previous framed demo's pause state
 		// doesn't leak into a live demo.
 		dispCtrl.Reset()
@@ -596,10 +730,10 @@ func main() {
 		romProv.Symbols = merged
 		romProv.Annotations = d.Annotations
 		paintInitialDisplay()
-		clockProv.Reset()
+		sharedHub.CmdReset()
 		currentDemo = d.Name
 		if wasRunning {
-			clockProv.SetRunning(true)
+			sharedHub.CmdRun(0, 0)
 		}
 	}
 
@@ -618,8 +752,11 @@ func main() {
 		if name == currentCPU {
 			return
 		}
+		// Hub-driven stop, not clockProv.SetRunning — machineReset
+		// below issues a CmdReset that halts the Pump, and only
+		// CmdRun can restart it.
 		wasRunning := clockProv.Running()
-		clockProv.SetRunning(false)
+		sharedHub.CmdStop()
 		newBackend, err := buildBackend(name)
 		if err != nil {
 			return
@@ -651,7 +788,7 @@ func main() {
 		}
 		machineReset()
 		if wasRunning {
-			clockProv.SetRunning(true)
+			sharedHub.CmdRun(0, 0)
 		}
 	}
 
@@ -668,8 +805,14 @@ func main() {
 			OnSelect: func() {
 				if app.Manager.Contains(w) {
 					app.Manager.Remove(w)
+					if w == scopeWin {
+						stopScopeTick()
+					}
 				} else {
 					app.Manager.Add(w)
+					if w == scopeWin {
+						startScopeTick()
+					}
 				}
 			},
 		})
@@ -769,7 +912,13 @@ func main() {
 				}
 				return "stopped"
 			},
-			OnClick: func() { clockProv.SetRunning(!clockProv.Running()) },
+			OnClick: func() {
+				if clockProv.Running() {
+					sharedHub.CmdStop()
+				} else {
+					sharedHub.CmdRun(0, 0)
+				}
+			},
 		},
 		{
 			Compute: func() string {
@@ -786,6 +935,8 @@ func main() {
 			hz = 1
 		case "10":
 			hz = 10
+		case "20":
+			hz = 20
 		case "100":
 			hz = 100
 		case "1k", "1000":
@@ -794,7 +945,7 @@ func main() {
 			hz = 0
 		}
 		if hz < 0 || !clockProv.SetSpeedHz(hz) {
-			fmt.Fprintf(os.Stderr, "unknown -speed=%q (want 1, 10, 100, 1k, max)\n", *speedFlag)
+			fmt.Fprintf(os.Stderr, "unknown -speed=%q (want 1, 10, 20, 100, 1k, max)\n", *speedFlag)
 			os.Exit(2)
 		}
 	}

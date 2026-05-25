@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>6502 Sim — browser build</title>
 <style>
   :root {
@@ -123,7 +124,14 @@
      that would otherwise leave a lopsided gap below the row. */
   .card.wide { grid-column: 1 / -1; }
   .card.wide ul { columns: 2; column-gap: 24px; }
-  @media (max-width: 720px) { .card.wide ul { columns: 1; } }
+  /* On phones force every card to its own row — auto-fit can otherwise
+     fit two 280 px cards side-by-side on 600+ px viewports, which
+     squeezes the text harder than just stacking. Same 720 px breakpoint
+     used elsewhere on the page for a single visual cutover. */
+  @media (max-width: 720px) {
+    .grid { grid-template-columns: 1fr; }
+    .card.wide ul { columns: 1; }
+  }
   .card h2 {
     margin: 0 0 8px;
     font-size: 12px;

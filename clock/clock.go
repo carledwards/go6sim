@@ -25,6 +25,7 @@ type Speed struct {
 var Speeds = []Speed{
 	{"1Hz", 1},
 	{"10Hz", 10},
+	{"20Hz", 20},
 	{"100Hz", 100},
 	{"1kHz", 1000},
 	{"10kHz", 10000},
@@ -173,20 +174,32 @@ func (d *Driver) StepInstruction() {
 	}
 	startPC := d.Backend.Registers().PC
 	prevSync := d.Backend.SYNC()
+	// syncModeled = "this backend actually drives the SYNC pad."
+	// Bootstrap from the entry sample (a SYNC=true entry implies real
+	// SYNC machinery), then flip to true if we ever observe SYNC
+	// asserted during the loop. Used to gate the PC-change fallback
+	// below: real backends (interp, netsim) increment PC mid-
+	// instruction byte by byte as the silicon executes microcode, so
+	// PC-change would fire after the first operand fetch — long
+	// before the actual instruction boundary. Only the minimal test
+	// fake that never asserts SYNC needs the PC fallback.
+	syncModeled := prevSync
 	for i := 0; i < maxStepHalves; i++ {
 		d.halfStep()
 		d.stepsDone++
+		curr := d.Backend.SYNC()
+		if curr {
+			syncModeled = true
+		}
 		// Primary signal: SYNC just rose — boundary halfStep fired
 		// (fetch + execute). One instruction's logic just ran.
-		curr := d.Backend.SYNC()
 		if curr && !prevSync {
 			return
 		}
 		prevSync = curr
-		// Fast-path / fallback: PC advanced. Catches backends that
-		// don't model SYNC realistically, and gives a redundant
-		// success criterion when PC moves anyway.
-		if d.Backend.Registers().PC != startPC {
+		// Fallback: PC advanced. Only honored for backends that don't
+		// model SYNC at all — see syncModeled comment above.
+		if !syncModeled && d.Backend.Registers().PC != startPC {
 			return
 		}
 	}

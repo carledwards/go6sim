@@ -17,11 +17,21 @@ to real silicon unmodified.
 
 ## Screenshots
 
-![go6sim](docs/images/screen-3.gif)
+**TUI Logic Analyzer** — bus + control-line trace in a real terminal,
+captured at 20 Hz with single-step granularity.
 
-![go6sim](docs/images/screen-1.gif)
+![TUI Logic Analyzer](docs/images/tui_logic_analyzer.gif)
 
-![go6sim](docs/images/screen-2.gif)
+**Wasm Logic Analyzer** — same widget rendered to a browser canvas
+via the pixel-overlay path; ~8× the sample density per cell.
+
+![Wasm Logic Analyzer](docs/images/wasm_logic_analyzer.gif)
+
+**Wasm Emulation** — the full simulator running in a browser tab:
+CPU window, memory viewer, Monitor REPL, and the VIC graphics demo
+all driven by the same backend that runs in the terminal.
+
+![Wasm Emulation](docs/images/wasm_emu.gif)
 
 ## Quickstart
 
@@ -121,7 +131,7 @@ The protocol contract lives in [`docs/bridge-v2.md`](docs/bridge-v2.md).
 |----------------|-----------|-------------------------------------------------------|
 | `-cpu`         | `interp`  | CPU backend: `interp` or `netsim` (transistor)        |
 | `-run`         | `true`    | Start the clock running immediately                   |
-| `-speed`       | `max`     | Initial clock target: `1`, `10`, `100`, `1k`, `max`   |
+| `-speed`       | `max`     | Initial clock target: `1`, `10`, `20`, `100`, `1k`, `max` |
 | `-batch`       | `0`       | Max half-cycles per UI tick (0 = auto-tune at startup)|
 | `-cpuprofile`  | (off)     | Write CPU pprof to file                               |
 | `-memprofile`  | (off)     | Write heap pprof at exit                              |

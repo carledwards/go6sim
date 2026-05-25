@@ -551,26 +551,53 @@ func (h *Hub) CmdStop() {
 }
 
 // CmdStep enqueues a step command. kind ∈ {"instruction","halfcycle"}.
-// n must be > 0. Pump runs at most `n` units of the named granularity
-// and emits clock.halt { reason: "step" }.
+// n must be > 0. Emits clock.halt { reason: "step" } when the step
+// completes.
 //
-// Phase A: "instruction" granularity is approximated as ~2
-// half-cycles/step (mean 6502 instruction is 3 cycles = 6 half-
-// cycles; we cap at the lower bound to favour responsiveness). A
-// more precise implementation tracks SYNC boundaries directly; later
-// phase.
+// "instruction" routes through Instrument.Step which advances via
+// Driver.StepInstruction — that halts on the SYNC pad's rising edge
+// (or PC change as fallback), so one CmdStep("instruction", 1) call
+// completes exactly one 6502 instruction regardless of its cycle
+// count (2-7 cycles). Done synchronously on the Pump goroutine
+// because a single instruction is ~50 ms worst-case in netsim,
+// ~µs in interp — fast enough that the half-cycle-batched run-loop
+// path would just add overhead.
+//
+// "halfcycle" stays on the batched half-cycle budget path so n large
+// counts (e.g. "run 1000 half-cycles") are interruptible per slice.
 func (h *Hub) CmdStep(kind string, n int) {
 	if n <= 0 {
 		n = 1
 	}
-	halves := n
 	if kind == "instruction" {
-		halves = n * 6 // approximate; refined in Phase B
+		h.IssueCommand(func(p *Pump) {
+			// queryMu is already held by the Pump's command drain
+			// (see the slice loop's `cmd := <-h.commandsCh` branch
+			// which Locks/Unlocks around cmd(p)). Re-locking here
+			// would self-deadlock. Stop any in-flight free-run first
+			// so Driver.StepInstruction (which is a no-op while
+			// running) actually advances cycles.
+			p.running = false
+			p.stepRemaining = 0
+			p.runUntilBudget = 0
+			p.consumedTotal = 0
+			h.inst.SetRunning(false)
+			before := h.inst.Driver().Backend.HalfCycles()
+			h.inst.Step(n)
+			after := h.inst.Driver().Backend.HalfCycles()
+			pc := h.inst.Driver().Backend.Registers().PC
+			h.broadcastHalt("step", instrument.RunResult{
+				HalfCycles: after - before,
+				Reason:     "step",
+				Addr:       pc,
+			})
+		})
+		return
 	}
 	h.IssueCommand(func(p *Pump) {
 		p.running = true
 		p.consumedTotal = 0
-		p.stepRemaining = halves
+		p.stepRemaining = n
 		p.runUntilBudget = 0
 		p.lastStateSnapshot = time.Time{}
 		p.h.inst.SetRunning(true)

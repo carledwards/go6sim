@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"syscall/js"
 	"time"
 
 	foxpro "github.com/carledwards/foxpro-go"
@@ -183,18 +184,18 @@ func main() {
 	backend.Reset()
 	cpuTitle := fmt.Sprintf("CPU (%s)", currentCPU)
 
-	// SimulationScreen size — 160×40 gives the Monitor pane room to
-	// sit alongside the existing windows without overlapping. The
-	// widest pre-existing window (Display at col 60, W=77) still
-	// ends at col 136, leaving 23 cols of headroom on the right and
-	// 9 rows of headroom on the bottom for Monitor + future widgets.
-	// Mobile: the page's CSS scales the canvas to fit the viewport
-	// — the wasm side stays 160×40 logically.
+	// SimulationScreen size — desktop is 160×40 (gives the Monitor
+	// pane room to sit alongside CPU/VIA/Video without overlapping).
+	// Mobile (≤720 px viewport at load time) drops to 140×35 so the
+	// canvas fits a phone screen with fewer cells, each rendered at
+	// a smaller fontPx by sim.js. Layout is one-shot at boot — a JS
+	// resize / orientation change doesn't reflow the windows.
+	layout := pickLayout(detectMobile())
 	s := tcell.NewSimulationScreen("UTF-8")
 	if err := s.Init(); err != nil {
 		panic(err)
 	}
-	s.SetSize(160, 40)
+	s.SetSize(layout.cols, layout.rows)
 	s.EnableMouse()
 
 	app := foxpro.NewAppWithScreen(s)
@@ -249,7 +250,7 @@ func main() {
 
 	cpuProv := &cpuwin.Provider{Backend: backend}
 	cpuWindow := addWindow(cpuTitle,
-		foxpro.Rect{X: 0, Y: 1, W: 44, H: 11},
+		layout.cpu,
 		cpuProv,
 		cpuwin.MinW, cpuwin.MinH)
 
@@ -265,7 +266,7 @@ func main() {
 		Annotations:  bootDemo.Annotations,
 	}
 	memWin := addWindow("Memory ($0000)",
-		foxpro.Rect{X: 0, Y: 12, W: 78, H: 18},
+		layout.ram,
 		ramProv,
 		ramwin.MinW, ramwin.MinH)
 	ramProv.Window = memWin
@@ -283,7 +284,7 @@ func main() {
 		Annotations:  bootDemo.Annotations,
 	}
 	romWin := addWindow("Memory · disasm ($E000 - $FFFF)",
-		foxpro.Rect{X: 0, Y: 30, W: 120, H: 10},
+		layout.rom,
 		romProv,
 		ramwin.MinW, ramwin.MinH)
 	romProv.Window = romWin
@@ -322,7 +323,7 @@ func main() {
 	viaProv := &viawin.Provider{VIA: via1, Base: viaBase}
 	viaTitle := fmt.Sprintf("VIA 1 — $%04X @ %s", viaBase, viawin.FormatHz(via1.CrystalHz()))
 	viaWin := addWindow(viaTitle,
-		foxpro.Rect{X: 44, Y: 1, W: 56, H: 16},
+		layout.via,
 		viaProv,
 		viawin.MinW, viawin.MinH)
 
@@ -338,7 +339,7 @@ func main() {
 	hubDirect := bridge.NewHubDirect(sharedHub)
 	mon := monitor.New(simHost, hubDirect)
 	monitorWin := addWindow("Monitor",
-		foxpro.Rect{X: 78, Y: 23, W: 82, H: 15},
+		layout.monitor,
 		mon,
 		20, 5)
 	// Monitor is visible on startup in the wasm build — the
@@ -360,10 +361,40 @@ func main() {
 	// 8 samples per cell → 1024 visible samples at high density.
 	scopeProv := scopewin.New(128, true)
 	scopeWin := addWindow("Logic Analyzer",
-		foxpro.Rect{X: 1, Y: 1, W: 139, H: 30},
+		layout.scope,
 		scopeProv,
 		scopewin.MinW, scopewin.MinH)
 	app.Manager.Remove(scopeWin) // start hidden; toggle adds it back
+
+	// Scope-visible redraw heartbeat — 50 ms (~20 Hz). See
+	// cmd/6502-sim/main.go for why 30 Hz was too aggressive; the
+	// wasm canvas's own requestAnimationFrame paints independently
+	// so this only governs how often the Go side hands a fresh
+	// snapshot to JS.
+	var scopeTick func()
+	startScopeTick := func() {
+		if scopeTick != nil {
+			return
+		}
+		scopeTick = app.Tick(50*time.Millisecond, nil)
+	}
+	stopScopeTick := func() {
+		if scopeTick == nil {
+			return
+		}
+		scopeTick()
+		scopeTick = nil
+	}
+	scopeWin.OnClose = func() {
+		app.Manager.Remove(scopeWin)
+		stopScopeTick()
+	}
+
+	// VIA and the memory-disasm window are hidden by default — the
+	// Monitor REPL covers most disassembly needs, and the VIA
+	// internals are an "advanced" view. Both stay in the Window menu
+	// and toggle back on with a click.
+	app.Manager.Remove(viaWin)
 
 	// Capture per-half-step bus state. Cheap closure, fired from
 	// inside clockProv's HalfStep paths (Advance/Step*).
@@ -374,11 +405,32 @@ func main() {
 	// pulse. Edge-detection gives exactly one yellow per
 	// instruction on both backends, with matching spacing.
 	prevSync := false
+	// scopeWasTooFast — see cmd/6502-sim/main.go for the rationale.
+	// Clears the ring once on the down-transition so the trace grows
+	// in from the right when the user slows the clock back down.
+	scopeWasTooFast := false
 	clockProv.OnHalfStep = func() {
+		if !app.Manager.Contains(scopeWin) {
+			return
+		}
+		tooFast := scopeProv.Decimate > 8
+		if tooFast {
+			scopeWasTooFast = true
+			return
+		}
+		if scopeWasTooFast {
+			scopeProv.Reset()
+			scopeWasTooFast = false
+		}
 		s := backend.SYNC()
 		edge := s && !prevSync
 		prevSync = s
-		scopeProv.Capture(backend.AddressBus(), backend.DataBus(), edge)
+		// force=true when the clock isn't free-running: single-step
+		// fires only a handful of half-cycles per `s` press, so the
+		// speed-based Decimate throttle would swallow them entirely.
+		scopeProv.Capture(backend.AddressBus(), backend.DataBus(), edge,
+			backend.ReadCycle(), backend.IRQ(), backend.NMI(),
+			!clockProv.Running())
 	}
 
 	// machineReset = simulated hardware reset button. Drops the VIC
@@ -434,10 +486,33 @@ func main() {
 	}
 	dispTitle := fmt.Sprintf("Video $%04X-$%04X", colorBase, ctrlBase+8)
 	dispWindow := addWindow(dispTitle,
-		foxpro.Rect{X: 100, Y: 1, W: 60, H: 22},
+		layout.video,
 		dispProv,
 		displaywin.MinW, displaywin.MinH)
 	dispProv.Window = dispWindow // lets Provider append [TEXT]/[GFX] to the title each Draw
+
+	// Video starts collapsed: just the framebuffer + the "[ ] Expanded
+	// view" toggle row. Expanding reveals Status, the Video Mode
+	// picker, AND the buttons grid (Frame Sync, Clear, Scroll/Rotate
+	// …) all at once. Capture both axes so collapsing also shrinks
+	// width down to the framebuffer's natural footprint, not just
+	// height.
+	expandedVideoW := dispWindow.Bounds.W
+	expandedVideoH := dispWindow.Bounds.H
+	collapsedVideoW := layout.videoCollapsedW
+	collapsedVideoH := layout.videoCollapsedH
+	dispWindow.Bounds.W = collapsedVideoW
+	dispWindow.Bounds.H = collapsedVideoH
+	dispProv.Expanded = false
+	dispProv.OnToggleExpanded = func() {
+		if dispProv.Expanded {
+			dispWindow.Bounds.W = expandedVideoW
+			dispWindow.Bounds.H = expandedVideoH
+		} else {
+			dispWindow.Bounds.W = collapsedVideoW
+			dispWindow.Bounds.H = collapsedVideoH
+		}
+	}
 
 	// Z-order: addWindow accumulates in code order, but the desired
 	// stack (back-to-front) is RAM → CPU → VIA → Video → Monitor → ROM
@@ -625,8 +700,14 @@ func main() {
 			OnSelect: func() {
 				if app.Manager.Contains(w) {
 					app.Manager.Remove(w)
+					if w == scopeWin {
+						stopScopeTick()
+					}
 				} else {
 					app.Manager.Add(w)
+					if w == scopeWin {
+						startScopeTick()
+					}
 				}
 			},
 		})
@@ -908,4 +989,83 @@ func openAbout(a *foxpro.App) {
 	})
 	w := foxpro.NewWindow("About", foxpro.Rect{X: 30, Y: 4, W: 56, H: 20}, body)
 	a.Manager.Add(w)
+}
+
+// winLayout collects every floating window's rect + the overall
+// SimulationScreen size. Two presets (desktop + mobile) are picked
+// once at boot from viewport width — the cell grid never reflows
+// after that, so a phone-rotate or window-resize doesn't move
+// anything. User refreshes the page if they want the other layout.
+type winLayout struct {
+	cols, rows                          int
+	cpu, via, video, ram, monitor, rom  foxpro.Rect
+	scope                               foxpro.Rect
+	// videoCollapsedW / videoCollapsedH are the Video window's
+	// dimensions when "[ ] Expanded view" is unchecked: width shrinks
+	// to just framebuffer + borders (no Status / Mode picker), height
+	// shrinks to fit framebuffer + the checkbox row (no buttons grid).
+	// video.W / video.H are the expanded dimensions.
+	videoCollapsedW, videoCollapsedH    int
+}
+
+// pickLayout returns the desktop (160×40) layout, or a tighter
+// 140×35 layout for narrow viewports. Mobile rects are proportionally
+// trimmed from the desktop ones; z-order at the bottom of main()
+// (RAM → CPU → VIA → Video → Monitor → ROM) is the same on both so
+// the visual stack reads identically.
+func pickLayout(isMobile bool) winLayout {
+	// Collapsed Video dimensions: just framebuffer (40×13 cells) +
+	// chrome + the "[ ] Expanded view" toggle row directly below. Math:
+	//   W = pxW(40) + 2 borders + 2 chrome = 44
+	//   H = pxH(13) + 2 borders + 1 checkbox row + 2 chrome = 18
+	const (
+		collapsedVideoW = 44
+		collapsedVideoH = 18
+	)
+	if isMobile {
+		return winLayout{
+			cols: 140, rows: 35,
+			cpu:             foxpro.Rect{X: 0, Y: 1, W: 68, H: 11},
+			via:             foxpro.Rect{X: 40, Y: 1, W: 52, H: 14},
+			video:           foxpro.Rect{X: 70, Y: 1, W: 68, H: 20},
+			ram:             foxpro.Rect{X: 0, Y: 13, W: 68, H: 8},
+			monitor:         foxpro.Rect{X: 70, Y: 22, W: 68, H: 11},
+			rom:             foxpro.Rect{X: 0, Y: 22, W: 68, H: 11},
+			scope:           foxpro.Rect{X: 1, Y: 1, W: 138, H: 26},
+			videoCollapsedW: collapsedVideoW,
+			videoCollapsedH: collapsedVideoH,
+		}
+	}
+	return winLayout{
+		cols: 160, rows: 40,
+		cpu:             foxpro.Rect{X: 0, Y: 1, W: 78, H: 11},
+		via:             foxpro.Rect{X: 44, Y: 1, W: 56, H: 16},
+		video:           foxpro.Rect{X: 80, Y: 1, W: 72, H: 22},
+		ram:             foxpro.Rect{X: 0, Y: 13, W: 78, H: 8},
+		monitor:         foxpro.Rect{X: 80, Y: 24, W: 78, H: 14},
+		rom:             foxpro.Rect{X: 0, Y: 22, W: 78, H: 16},
+		scope:           foxpro.Rect{X: 1, Y: 1, W: 139, H: 30},
+		videoCollapsedW: collapsedVideoW,
+		videoCollapsedH: collapsedVideoH,
+	}
+}
+
+// detectMobile asks the browser if the viewport is narrow enough
+// to count as a phone. Same 720 px cutover used by sim.js for the
+// fontPx switch and by index.html for the info-card single-column
+// reflow — one breakpoint across the page. Safe-guards if matchMedia
+// isn't present (very old browsers) — we just return false.
+func detectMobile() bool {
+	win := js.Global().Get("window")
+	if !win.Truthy() {
+		return false
+	}
+	if mm := win.Get("matchMedia"); !mm.Truthy() {
+		return false
+	}
+	res := win.Call("matchMedia", "(max-width: 720px)")
+	if !res.Truthy() {
+		return false
+	}
+	return res.Get("matches").Bool()
 }

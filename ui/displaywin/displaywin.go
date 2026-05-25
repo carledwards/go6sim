@@ -5,6 +5,7 @@
 package displaywin
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -172,6 +173,28 @@ type Provider struct {
 	// take a hard dependency on dialog or on app.Manager). If nil,
 	// the click cycles Text↔Graphics directly via the controller.
 	OnPickMode func()
+
+	// Expanded controls whether the buttons grid (Frame Sync, Clear,
+	// Scroll/Rotate …) renders below the framebuffer. Collapsed
+	// (default) is a quieter view that only shows the live screen +
+	// Status + Mode picker — appropriate when the host wants the
+	// window to act as a passive display and the user only
+	// occasionally needs the manual POKE controls. The checkbox
+	// drawn in the right column toggles it.
+	Expanded bool
+
+	// OnToggleExpanded fires after Expanded flips. Hosts use it to
+	// resize the containing window so the buttons grid actually has
+	// room (or the collapsed window shrinks back down). The flag
+	// flips before the callback, so the host can read p.Expanded to
+	// pick the new height. Optional — nil means the flag toggles but
+	// the window keeps its current bounds.
+	OnToggleExpanded func()
+
+	// expandedRect captures the on-screen rect of the "[X] Expanded
+	// view" checkbox from the most recent Draw, in screen coords.
+	// HandleMouse uses it for click hit-testing.
+	expandedRect foxpro.Rect
 }
 
 // cellsPerPixel returns the on-screen cell width of one logical
@@ -370,8 +393,12 @@ func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.The
 	c.Set(1+pxW, by, '┘', frame)
 
 	// ─── Right column: Status + Mode picker ────────────────
+	// Hidden when collapsed — they sit in the right column, so the
+	// host can also shrink the window's width down to just the
+	// framebuffer + borders when neither needs to be visible.
 	rcX := pxW + 4
-	if p.HasCtrl && p.Controller != nil {
+	p.modeRect = foxpro.Rect{} // cleared every frame; only set when actually drawn
+	if p.Expanded && p.HasCtrl && p.Controller != nil {
 		paused := p.Controller.IsPaused()
 		status := "Running    "
 		if paused {
@@ -441,7 +468,36 @@ func (p *Provider) Draw(screen tcell.Screen, inner foxpro.Rect, theme foxpro.The
 		}
 	}
 
+	// ─── Expanded-view checkbox (below the framebuffer) ─────
+	// Sits one row under the bottom border so it stays visible in
+	// both collapsed and expanded states — collapsed gives just the
+	// framebuffer + this toggle; expanded reveals Status + Mode +
+	// the buttons grid. Click flips p.Expanded and fires
+	// OnToggleExpanded so the host can resize the window.
+	{
+		mark := ' '
+		if p.Expanded {
+			mark = 'X'
+		}
+		label := fmt.Sprintf("[%c] Expanded view", mark)
+		cbX := 1
+		cbY := pxH + 2 // one row below the '└──┘' bottom edge
+		c.Put(cbX, cbY, label, bg)
+		p.expandedRect = foxpro.Rect{
+			X: inner.X + cbX - p.X,
+			Y: inner.Y + cbY - p.Y,
+			W: runeLen(label),
+			H: 1,
+		}
+	}
+
 	// ─── Buttons grid (below the display) ───────────────────
+	// Skipped entirely when Expanded is false — the right-column
+	// checkbox toggles it back on. Right column (Status, Mode picker,
+	// checkbox) stays visible in both states.
+	if !p.Expanded {
+		return
+	}
 	visible := p.visibleButtonDefs()
 	cols := buttonGridCols(inner.W)
 	now := time.Now()
@@ -550,6 +606,14 @@ func (p *Provider) HandleMouse(ev *tcell.EventMouse, inner foxpro.Rect) bool {
 				next = display.ModeGraphics
 			}
 			p.Bus.Write(p.CtrlBase+display.RegMode, next)
+		}
+		return true
+	}
+
+	if p.expandedRect.Contains(mx, my) {
+		p.Expanded = !p.Expanded
+		if p.OnToggleExpanded != nil {
+			p.OnToggleExpanded()
 		}
 		return true
 	}
