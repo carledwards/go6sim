@@ -825,7 +825,7 @@ func main() {
 				{Tag: "visual", X: 10, Y: 2, W: 80, H: 30, Visible: false},
 			},
 		},
-		{Name: "bouncer", Label: "Bouncer · netsim · 1 kHz", Demo: demos.BouncerDemo, CPU: "netsim", Hz: 1000,
+		{Name: "bouncer", Label: "Bouncer · netsim · 20 Hz", Demo: demos.BouncerDemo, CPU: "netsim", Hz: 20,
 			Windows: []windowSpec{
 				{Tag: "cpu", X: 0, Y: 1, W: 78, H: 11, Visible: true},
 				{Tag: "memory", X: 0, Y: 13, W: 78, H: 8, Visible: true},
