@@ -9,10 +9,15 @@
 // netsim adapter is what you reach for if you want cycle-accurate
 // bus timing.
 //
-// All 151 official 6502 opcodes are covered; undocumented opcodes
-// are decoded as NOP. ADC/SBC are binary-mode only (decimal-mode
-// flag is preserved but ignored — same compromise NES emulators
-// make, since the 2A03 lacks decimal mode anyway).
+// The core emulates either an NMOS 6502 (the default, matching the
+// C64's 6510) or a CMOS 65C02 — select with NewArch. All 151 official
+// NMOS opcodes plus the 65C02 additions (BRA, PHX/PHY/PLX/PLY, STZ,
+// TRB/TSB, INC/DEC A, (zp) addressing, BIT immediate, JMP (abs,x)) are
+// covered; remaining undocumented opcodes decode as NOP. ADC/SBC honour
+// decimal mode with the correct NMOS and CMOS flag behaviours. The
+// variants also differ in the JMP-indirect page bug (present on NMOS,
+// fixed on CMOS) and in clearing decimal mode on interrupt entry (CMOS
+// only).
 package interp
 
 import (
@@ -33,13 +38,19 @@ const (
 
 // Adapter implements cpu.Backend over a Bus.
 type Adapter struct {
-	bus bus.Bus
+	bus  bus.Bus
+	arch cpu.Arch
 
 	a, x, y, sp, p uint8
 	pc             uint16
 
 	halfCyclesLeft  int
 	halfCyclesTotal uint64
+
+	// deltaCycles holds per-instruction cycle adjustments computed
+	// during execution (e.g. the extra cycle a 65C02 spends in
+	// decimal-mode ADC/SBC). Reset at the start of every execute().
+	deltaCycles int
 
 	// Last bus-access record — surfaced via AddressBus / DataBus /
 	// ReadCycle so the UI can display A, D, R/W just like netsim.
@@ -68,9 +79,30 @@ type Adapter struct {
 	prevNMI bool
 }
 
-// New creates an Adapter wired to the given bus. Call Reset before
-// HalfStep — the constructor leaves the CPU in a zeroed state.
-func New(b bus.Bus) *Adapter { return &Adapter{bus: b} }
+// New creates an NMOS Adapter wired to the given bus. Call Reset before
+// HalfStep — the constructor leaves the CPU in a zeroed state. NMOS is
+// the default because it matches the 6510 in the Commodore 64.
+func New(b bus.Bus) *Adapter { return &Adapter{bus: b, arch: cpu.NMOS} }
+
+// NewArch is like New but selects the 6502 variant (cpu.NMOS or
+// cpu.CMOS). The variant changes decimal-mode interrupt handling, the
+// JMP-indirect bug, and which extra opcodes decode.
+func NewArch(b bus.Bus, arch cpu.Arch) *Adapter { return &Adapter{bus: b, arch: arch} }
+
+// Arch reports which 6502 variant this Adapter emulates.
+func (a *Adapter) Arch() cpu.Arch { return a.arch }
+
+// SetSP overwrites the stack pointer. Useful for test harnesses that
+// place the CPU in a known state without running a full reset.
+func (a *Adapter) SetSP(sp uint8) { a.sp = sp }
+
+// SetA, SetX, SetY, SetP overwrite the remaining architectural
+// registers. Like SetSP, these are state-injection hooks for tests; the
+// running emulator never needs them.
+func (a *Adapter) SetA(v uint8) { a.a = v }
+func (a *Adapter) SetX(v uint8) { a.x = v }
+func (a *Adapter) SetY(v uint8) { a.y = v }
+func (a *Adapter) SetP(v uint8) { a.p = v }
 
 func (a *Adapter) Reset() {
 	a.a, a.x, a.y = 0, 0, 0
@@ -146,6 +178,9 @@ func (a *Adapter) serviceIRQ() {
 	a.push(uint8(a.pc))
 	a.push((a.p | flagU) &^ flagB)
 	a.setFlag(flagI, true)
+	if a.arch == cpu.CMOS {
+		a.setFlag(flagD, false) // 65C02 clears decimal mode on interrupt entry
+	}
 	a.pc = a.read16(0xFFFE)
 	a.halfCyclesLeft = 2*7 - 1
 }
@@ -176,6 +211,9 @@ func (a *Adapter) serviceNMI() {
 	a.push(uint8(a.pc >> 8))
 	a.push(uint8(a.pc))
 	a.push((a.p | flagU) &^ flagB)
+	if a.arch == cpu.CMOS {
+		a.setFlag(flagD, false) // 65C02 clears decimal mode on interrupt entry
+	}
 	a.pc = a.read16(0xFFFA)
 	a.halfCyclesLeft = 2*7 - 1
 }
@@ -309,6 +347,14 @@ func (a *Adapter) opAND(v uint8) { a.a &= v; a.setZN(a.a) }
 func (a *Adapter) opEOR(v uint8) { a.a ^= v; a.setZN(a.a) }
 
 func (a *Adapter) opADC(v uint8) {
+	if a.p&flagD != 0 {
+		if a.arch == cpu.CMOS {
+			a.adcDecimalCMOS(v)
+		} else {
+			a.adcDecimalNMOS(v)
+		}
+		return
+	}
 	cin := uint16(0)
 	if a.p&flagC != 0 {
 		cin = 1
@@ -321,7 +367,159 @@ func (a *Adapter) opADC(v uint8) {
 	a.setZN(a.a)
 }
 
-func (a *Adapter) opSBC(v uint8) { a.opADC(^v) }
+func (a *Adapter) opSBC(v uint8) {
+	if a.p&flagD != 0 {
+		if a.arch == cpu.CMOS {
+			a.sbcDecimalCMOS(v)
+		} else {
+			a.sbcDecimalNMOS(v)
+		}
+		return
+	}
+	a.opADC(^v)
+}
+
+func (a *Adapter) carryIn() uint32 {
+	if a.p&flagC != 0 {
+		return 1
+	}
+	return 0
+}
+
+// adcDecimalNMOS implements BCD add-with-carry with NMOS 6502 flag
+// semantics: carry and the final value are BCD-corrected; N/Z come from
+// the corrected result, V from the binary high-nibble overflow.
+func (a *Adapter) adcDecimalNMOS(v uint8) {
+	acc, add := uint32(a.a), uint32(v)
+	lo := (acc & 0x0f) + (add & 0x0f) + a.carryIn()
+	var carrylo uint32
+	if lo >= 0x0a {
+		carrylo = 0x10
+		lo -= 0x0a
+	}
+	hi := (acc & 0xf0) + (add & 0xf0) + carrylo
+	if hi >= 0xa0 {
+		a.setFlag(flagC, true)
+		hi -= 0xa0
+	} else {
+		a.setFlag(flagC, false)
+	}
+	res := hi | lo
+	a.setFlag(flagV, (acc^res)&0x80 != 0 && (acc^add)&0x80 == 0)
+	a.a = uint8(res)
+	a.setZN(a.a)
+}
+
+// adcDecimalCMOS implements BCD add-with-carry with 65C02 flag
+// semantics: overflow is seeded before correction, then narrowed, and
+// the instruction takes one extra cycle.
+func (a *Adapter) adcDecimalCMOS(v uint8) {
+	acc, add := uint32(a.a), uint32(v)
+	a.setFlag(flagV, (acc^add)&0x80 == 0)
+	lo := (acc & 0x0f) + (add & 0x0f) + a.carryIn()
+	var carrylo uint32
+	if lo >= 0x0a {
+		carrylo = 0x10
+		lo -= 0x0a
+	}
+	hi := (acc & 0xf0) + (add & 0xf0) + carrylo
+	if hi >= 0xa0 {
+		a.setFlag(flagC, true)
+		if hi >= 0x180 {
+			a.setFlag(flagV, false)
+		}
+		hi -= 0xa0
+	} else {
+		a.setFlag(flagC, false)
+		if hi < 0x80 {
+			a.setFlag(flagV, false)
+		}
+	}
+	a.a = uint8(hi | lo)
+	a.setZN(a.a)
+	a.deltaCycles++
+}
+
+// sbcDecimalNMOS implements BCD subtract-with-borrow, NMOS flag rules.
+func (a *Adapter) sbcDecimalNMOS(v uint8) {
+	acc, sub := uint32(a.a), uint32(v)
+	lo := 0x0f + (acc & 0x0f) - (sub & 0x0f) + a.carryIn()
+	var carrylo uint32
+	if lo < 0x10 {
+		lo -= 0x06
+	} else {
+		lo -= 0x10
+		carrylo = 0x10
+	}
+	hi := 0xf0 + (acc & 0xf0) - (sub & 0xf0) + carrylo
+	if hi < 0x100 {
+		a.setFlag(flagC, false)
+		hi -= 0x60
+	} else {
+		a.setFlag(flagC, true)
+		hi -= 0x100
+	}
+	res := hi | lo
+	a.setFlag(flagV, (acc^res)&0x80 != 0 && (acc^sub)&0x80 != 0)
+	a.a = uint8(res)
+	a.setZN(a.a)
+}
+
+// sbcDecimalCMOS implements BCD subtract-with-borrow, 65C02 flag rules
+// (overflow seeded before correction, +1 cycle).
+func (a *Adapter) sbcDecimalCMOS(v uint8) {
+	acc, sub := uint32(a.a), uint32(v)
+	a.setFlag(flagV, (acc^sub)&0x80 != 0)
+	lo := 0x0f + (acc & 0x0f) - (sub & 0x0f) + a.carryIn()
+	var carrylo uint32
+	if lo < 0x10 {
+		lo -= 0x06
+	} else {
+		lo -= 0x10
+		carrylo = 0x10
+	}
+	hi := 0xf0 + (acc & 0xf0) - (sub & 0xf0) + carrylo
+	if hi < 0x100 {
+		a.setFlag(flagC, false)
+		if hi < 0x80 {
+			a.setFlag(flagV, false)
+		}
+		hi -= 0x60
+	} else {
+		a.setFlag(flagC, true)
+		if hi >= 0x180 {
+			a.setFlag(flagV, false)
+		}
+		hi -= 0x100
+	}
+	a.a = uint8(hi | lo)
+	a.setZN(a.a)
+	a.deltaCycles++
+}
+
+// trb / tsb are 65C02 read-modify-write bit ops. Both set Z from the
+// pre-modify AND with A; TSB sets the masked bits, TRB clears them.
+func (a *Adapter) tsb(addr uint16) {
+	m := a.read(addr)
+	a.setFlag(flagZ, a.a&m == 0)
+	a.write(addr, m|a.a)
+}
+
+func (a *Adapter) trb(addr uint16) {
+	m := a.read(addr)
+	a.setFlag(flagZ, a.a&m == 0)
+	a.write(addr, m&^a.a)
+}
+
+// amINDZP is the 65C02 zero-page indirect mode, (zp): the two bytes at
+// the zero-page pointer form the effective address, no indexing.
+func (a *Adapter) amINDZP() uint16 {
+	zp := a.read(a.pc)
+	a.pc++
+	lo := a.read(uint16(zp))
+	hi := a.read(uint16(zp + 1))
+	return uint16(lo) | uint16(hi)<<8
+}
 
 func (a *Adapter) opCMP(reg, v uint8) {
 	a.setFlag(flagC, reg >= v)
@@ -380,8 +578,16 @@ func (a *Adapter) branch(cond bool) {
 // ---------- dispatch ----------
 
 func (a *Adapter) execute() {
+	a.deltaCycles = 0
 	op := a.read(a.pc)
 	a.pc++
+
+	// 65C02-only opcodes and the variant-specific behaviours are handled
+	// first; anything the CMOS path doesn't claim falls through to the
+	// shared NMOS dispatch below.
+	if a.arch == cpu.CMOS && a.executeCMOS(op) {
+		return
+	}
 
 	cycles := 2 // default; specific opcodes override
 
@@ -434,6 +640,9 @@ func (a *Adapter) execute() {
 		a.push(uint8(a.pc))
 		a.push(a.p | flagB | flagU)
 		a.setFlag(flagI, true)
+		if a.arch == cpu.CMOS {
+			a.setFlag(flagD, false) // 65C02 clears decimal mode on BRK
+		}
 		a.pc = a.read16(0xFFFE)
 		a.brkCount++
 		cycles = 7
@@ -632,7 +841,136 @@ func (a *Adapter) execute() {
 		cycles = 2
 	}
 
-	a.halfCyclesLeft = 2*cycles - 1
+	a.done(cycles)
+}
+
+// done parks the CPU for the rest of the instruction's cycles, folding
+// in any per-instruction delta (e.g. the 65C02 decimal-mode penalty).
+func (a *Adapter) done(cycles int) {
+	a.halfCyclesLeft = 2*(cycles+a.deltaCycles) - 1
+}
+
+// executeCMOS dispatches the opcodes whose behaviour is unique to the
+// 65C02 — either entirely new opcodes or NMOS opcodes with corrected
+// behaviour (the JMP-indirect fix). It returns true when it handled the
+// opcode; false means "not a CMOS-specific opcode, use shared dispatch".
+func (a *Adapter) executeCMOS(op uint8) bool {
+	switch op {
+	// (zp) zero-page indirect addressing
+	case 0x12:
+		a.opORA(a.read(a.amINDZP()))
+		a.done(5)
+	case 0x32:
+		a.opAND(a.read(a.amINDZP()))
+		a.done(5)
+	case 0x52:
+		a.opEOR(a.read(a.amINDZP()))
+		a.done(5)
+	case 0x72:
+		a.opADC(a.read(a.amINDZP()))
+		a.done(5)
+	case 0xB2:
+		a.opLDA(a.read(a.amINDZP()))
+		a.done(5)
+	case 0xD2:
+		a.opCMP(a.a, a.read(a.amINDZP()))
+		a.done(5)
+	case 0xF2:
+		a.opSBC(a.read(a.amINDZP()))
+		a.done(5)
+	case 0x92:
+		a.write(a.amINDZP(), a.a)
+		a.done(5)
+
+	// STZ — store zero
+	case 0x64:
+		a.write(a.amZP(), 0)
+		a.done(3)
+	case 0x74:
+		a.write(a.amZPX(), 0)
+		a.done(4)
+	case 0x9C:
+		a.write(a.amABS(), 0)
+		a.done(4)
+	case 0x9E:
+		a.write(a.amABSX(), 0)
+		a.done(5)
+
+	// BIT — immediate sets only Z; the new indexed modes behave normally
+	case 0x89:
+		v := a.read(a.amIM())
+		a.setFlag(flagZ, a.a&v == 0)
+		a.done(2)
+	case 0x34:
+		a.opBIT(a.read(a.amZPX()))
+		a.done(4)
+	case 0x3C:
+		a.opBIT(a.read(a.amABSX()))
+		a.done(4)
+
+	// BRA — branch always
+	case 0x80:
+		a.branch(true)
+		a.done(3)
+
+	// INC / DEC accumulator
+	case 0x1A:
+		a.a++
+		a.setZN(a.a)
+		a.done(2)
+	case 0x3A:
+		a.a--
+		a.setZN(a.a)
+		a.done(2)
+
+	// JMP (abs,x)
+	case 0x7C:
+		ptr := a.read16(a.pc) + uint16(a.x)
+		a.pc += 2
+		a.pc = uint16(a.read(ptr)) | uint16(a.read(ptr+1))<<8
+		a.done(6)
+
+	// JMP (ind) — 65C02 fixes the NMOS page-boundary fetch bug
+	case 0x6C:
+		ptr := a.read16(a.pc)
+		a.pc += 2
+		a.pc = uint16(a.read(ptr)) | uint16(a.read(ptr+1))<<8
+		a.done(5)
+
+	// TRB / TSB
+	case 0x14:
+		a.trb(a.amZP())
+		a.done(5)
+	case 0x1C:
+		a.trb(a.amABS())
+		a.done(6)
+	case 0x04:
+		a.tsb(a.amZP())
+		a.done(5)
+	case 0x0C:
+		a.tsb(a.amABS())
+		a.done(6)
+
+	// Stack push/pull X and Y
+	case 0xDA:
+		a.push(a.x)
+		a.done(3)
+	case 0x5A:
+		a.push(a.y)
+		a.done(3)
+	case 0xFA:
+		a.x = a.pull()
+		a.setZN(a.x)
+		a.done(4)
+	case 0x7A:
+		a.y = a.pull()
+		a.setZN(a.y)
+		a.done(4)
+
+	default:
+		return false
+	}
+	return true
 }
 
 // opLDA / opLDX / opLDY pulled out so the dispatch above stays uniform.
