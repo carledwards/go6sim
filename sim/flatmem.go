@@ -1,9 +1,9 @@
 package sim
 
-import "github.com/carledwards/go6sim/bus"
+import "github.com/carledwards/go6sim/cpu"
 
-// flatMem is a 64K flat address space that satisfies bus.Bus. Reads and
-// writes hit a backing byte array unless an address has a registered
+// flatMem is a 64K flat address space that satisfies cpu.Memory. Reads
+// and writes hit a backing byte array unless an address has a registered
 // hook, in which case the hook handles the access. Hooks make it cheap
 // for a test to model a memory-mapped register without standing up a
 // full component on the real bus.
@@ -54,9 +54,4 @@ func (m *flatMem) onWrite(addr uint16, fn func(v byte)) {
 	m.writes[addr] = fn
 }
 
-// flatMem implements bus.Bus. Register/Components are unused by the test
-// harness (everything lives in the flat array), so they are inert.
-func (m *flatMem) Register(bus.Component) error { return nil }
-func (m *flatMem) Components() []bus.Component  { return nil }
-
-var _ bus.Bus = (*flatMem)(nil)
+var _ cpu.Memory = (*flatMem)(nil)

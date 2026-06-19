@@ -1,5 +1,7 @@
 package bus
 
+import "github.com/carledwards/go6sim/cpu"
+
 // Optional capability interfaces a Component may additionally implement.
 // The backplane / instrument layer discovers them by type-assertion
 // (idiomatic Go: small required interface + optional capabilities, like
@@ -30,24 +32,14 @@ type Snapshotter interface {
 	Restore([]byte) error
 }
 
-// Tap is a single named, observable signal a Component exposes for the
-// instrument/console (the "tap off the backplane" metaphor): an IRQ
-// line, a timer counter, the VIA PA/PB ports, a CPU interrupt-ack
-// strobe. Read returns the signal's current value; it must be cheap and
-// side-effect-free.
-type Tap struct {
-	Name string
-	Read func() uint64
-}
-
-// Tappable is a Component that publishes Taps. The instrument layer
-// renders these uniformly (TUI insight panels, web views, the future
-// debugger CLI) without knowing the concrete device. Nothing implements
-// this yet — VIA (IRQ asserted / fired-count) and the CPU card
-// (interrupt-ack / vectoring) gain it in brick 7.
-type Tappable interface {
-	Taps() []Tap
-}
+// Tap and Tappable now live in package cpu so the CPU core can publish
+// observables without importing bus (keeping an embedded/TinyGo CPU
+// build dependency-free). They are aliased here so existing components
+// and the instrument layer keep using bus.Tap / bus.Tappable unchanged.
+type (
+	Tap      = cpu.Tap
+	Tappable = cpu.Tappable
+)
 
 // IRQSource is a Component that can pull the shared, active-low IRQ
 // line. IRQAsserted reports true when this card currently requests an

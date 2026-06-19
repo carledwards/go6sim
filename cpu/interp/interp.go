@@ -1,5 +1,5 @@
 // Package interp is a textbook interpretive 6502 implementation that
-// satisfies cpu.Backend. Routes all memory access through bus.Bus.
+// satisfies cpu.Backend. Routes all memory access through a cpu.Memory.
 //
 // The implementation is instruction-grained: each opcode executes in
 // full on its first HalfStep, then the adapter "burns" the remaining
@@ -21,7 +21,6 @@
 package interp
 
 import (
-	"github.com/carledwards/go6sim/bus"
 	"github.com/carledwards/go6sim/cpu"
 )
 
@@ -36,9 +35,9 @@ const (
 	flagN = cpu.FlagN
 )
 
-// Adapter implements cpu.Backend over a Bus.
+// Adapter implements cpu.Backend over a cpu.Memory.
 type Adapter struct {
-	bus  bus.Bus
+	mem  cpu.Memory
 	arch cpu.Arch
 
 	a, x, y, sp, p uint8
@@ -79,15 +78,15 @@ type Adapter struct {
 	prevNMI bool
 }
 
-// New creates an NMOS Adapter wired to the given bus. Call Reset before
-// HalfStep — the constructor leaves the CPU in a zeroed state. NMOS is
-// the default because it matches the 6510 in the Commodore 64.
-func New(b bus.Bus) *Adapter { return &Adapter{bus: b, arch: cpu.NMOS} }
+// New creates an NMOS Adapter wired to the given memory. Call Reset
+// before HalfStep — the constructor leaves the CPU in a zeroed state.
+// NMOS is the default because it matches the 6510 in the Commodore 64.
+func New(m cpu.Memory) *Adapter { return &Adapter{mem: m, arch: cpu.NMOS} }
 
 // NewArch is like New but selects the 6502 variant (cpu.NMOS or
 // cpu.CMOS). The variant changes decimal-mode interrupt handling, the
 // JMP-indirect bug, and which extra opcodes decode.
-func NewArch(b bus.Bus, arch cpu.Arch) *Adapter { return &Adapter{bus: b, arch: arch} }
+func NewArch(m cpu.Memory, arch cpu.Arch) *Adapter { return &Adapter{mem: m, arch: arch} }
 
 // Arch reports which 6502 variant this Adapter emulates.
 func (a *Adapter) Arch() cpu.Arch { return a.arch }
@@ -166,7 +165,7 @@ func (a *Adapter) irqPending() bool {
 	if a.p&flagI != 0 {
 		return false
 	}
-	src, ok := a.bus.(interface{ IRQ() bool })
+	src, ok := a.mem.(interface{ IRQ() bool })
 	return ok && src.IRQ()
 }
 
@@ -192,7 +191,7 @@ func (a *Adapter) serviceIRQ() {
 // source deasserts and re-asserts. The bus may not implement a
 // reader (older wirings); in that case we never fire NMI.
 func (a *Adapter) nmiEdge() bool {
-	src, ok := a.bus.(interface{ NMI() bool })
+	src, ok := a.mem.(interface{ NMI() bool })
 	if !ok {
 		return false
 	}
@@ -229,11 +228,11 @@ func (a *Adapter) IRQ() bool  { return true }
 func (a *Adapter) NMI() bool  { return true }
 func (a *Adapter) SYNC() bool { return a.sync }
 
-// Taps exposes read-only observables (bus.Tappable). interp publishes
+// Taps exposes read-only observables (cpu.Tappable). interp publishes
 // the cumulative BRK-vector count; the instrument diffs it to detect a
 // vector-taken event for break-on-vector debugging.
-func (a *Adapter) Taps() []bus.Tap {
-	return []bus.Tap{
+func (a *Adapter) Taps() []cpu.Tap {
+	return []cpu.Tap{
 		{Name: "brk", Read: func() uint64 { return a.brkCount }},
 	}
 }
@@ -248,7 +247,7 @@ var _ cpu.Backend = (*Adapter)(nil)
 // ---------- memory + flag helpers ----------
 
 func (a *Adapter) read(addr uint16) uint8 {
-	v := a.bus.Read(addr)
+	v := a.mem.Read(addr)
 	a.lastAddr = addr
 	a.lastData = v
 	a.lastWasRead = true
@@ -256,7 +255,7 @@ func (a *Adapter) read(addr uint16) uint8 {
 }
 
 func (a *Adapter) write(addr uint16, v uint8) {
-	a.bus.Write(addr, v)
+	a.mem.Write(addr, v)
 	a.lastAddr = addr
 	a.lastData = v
 	a.lastWasRead = false
