@@ -4,13 +4,61 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Remote CPU Host — go6sim</title>
+<!-- Theme: pre-paint light/dark pick (dark default; key shared with thecarledwards.com projects). Remove for dark-only. -->
+<script>
+  (function () {
+    try {
+      var saved = localStorage.getItem('theme');
+      var light = saved === 'light' ||
+        (!saved && window.matchMedia('(prefers-color-scheme: light)').matches);
+      if (light) document.documentElement.classList.add('light');
+    } catch (e) {}
+  })();
+</script>
 <style>
+  /* Palette matches thecarledwards.com (Chirpy dark). The CRT bezel +
+     canvas below are the "instrument" and keep their own fixed colors. */
   :root {
-    --bg: #111;
-    --fg: #eee;
-    --muted: #888;
-    --accent: #4a9;
+    color-scheme: dark;
+    --bg: #1b1b1e;      /* page background */
+    --chip: #292929;    /* toggle hover */
+    --muted: #868686;   /* secondary text */
+    --text: #afb0b1;    /* body text */
+    --fg: #cccccc;      /* headings / strong */
+    --accent: #8ab4f8;  /* links / accent */
   }
+  /* --- light theme (remove this block + the toggle for dark-only) --- */
+  :root.light {
+    color-scheme: light;
+    --bg: #ffffff;
+    --chip: #e9ecef;
+    --muted: #757575;
+    --text: #34343c;
+    --fg: #2a2a2a;
+    --accent: #0056b2;
+  }
+  #theme-toggle {
+    position: fixed;
+    top: 6px;
+    right: 8px;
+    z-index: 10;
+    width: 32px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  #theme-toggle:hover { background: var(--chip); color: var(--fg); }
+  .theme-ico-sun, .theme-ico-moon { display: none; }
+  :root:not(.light) .theme-ico-sun { display: inline; }
+  :root.light .theme-ico-moon { display: inline; }
+  /* --- end light theme --- */
   html, body {
     margin: 0;
     padding: 0;
@@ -59,7 +107,7 @@
     margin: 18px auto 0;
     font-size: 13.5px;
     line-height: 1.5;
-    color: #ccc;
+    color: var(--text);
     text-align: center;
     padding: 0 12px;
   }
@@ -67,6 +115,17 @@
 </style>
 </head>
 <body>
+<!-- Theme toggle (remove for dark-only) -->
+<button id="theme-toggle" type="button" aria-label="Toggle light/dark theme" title="Toggle light/dark theme">
+  <svg class="theme-ico-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+  <svg class="theme-ico-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+</button>
+<script>
+  document.getElementById('theme-toggle').addEventListener('click', function () {
+    var light = document.documentElement.classList.toggle('light');
+    try { localStorage.setItem('theme', light ? 'light' : 'dark'); } catch (e) {}
+  });
+</script>
 <div id="wrap">
   <div id="status">loading…</div>
   <div class="crt">

@@ -4,16 +4,75 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>6502 Sim — browser build</title>
+<!-- Theme: pre-paint light/dark pick (dark default; key shared with thecarledwards.com projects). Remove for dark-only. -->
+<script>
+  (function () {
+    try {
+      var saved = localStorage.getItem('theme');
+      var light = saved === 'light' ||
+        (!saved && window.matchMedia('(prefers-color-scheme: light)').matches);
+      if (light) document.documentElement.classList.add('light');
+    } catch (e) {}
+  })();
+</script>
 <style>
+  /* Palette matches thecarledwards.com (Chirpy dark). The CRT bezel +
+     canvas below are the "instrument" and keep their own fixed colors. */
   :root {
-    --bg: #111;
-    --fg: #eee;
-    --muted: #888;
-    --accent: #4a9;
-    --rule: #2a2a2a;
-    --panel: #181818;
-    --tag: #b87333;
+    color-scheme: dark;
+    --bg: #1b1b1e;      /* page background */
+    --panel: #1e1e1e;   /* cards, buttons */
+    --chip: #292929;    /* inline code, button hover */
+    --border: #333437;  /* strong borders */
+    --rule: #3f4144;    /* rules, dotted table lines */
+    --faint: #717173;   /* dimmed rows */
+    --muted: #868686;   /* secondary text */
+    --lead: #a7a7a7;    /* lede paragraph */
+    --text: #afb0b1;    /* body text */
+    --fg: #cccccc;      /* headings / strong */
+    --accent: #8ab4f8;  /* links / accent */
+    --tag: #b87333;     /* copper tag (semantic) */
+    --addr: #d8c070;    /* address / code hue (semantic) */
   }
+  /* --- light theme (remove this block + the toggle for dark-only) --- */
+  :root.light {
+    color-scheme: light;
+    --bg: #ffffff;
+    --panel: #f6f8fa;
+    --chip: #e9ecef;
+    --border: #dee2e6;
+    --rule: #c1c3c5;
+    --faint: #8e8e8e;
+    --muted: #757575;
+    --lead: #585858;
+    --text: #34343c;
+    --fg: #2a2a2a;
+    --accent: #0056b2;
+    --tag: #9a5a22;
+    --addr: #8a6a00;
+  }
+  #theme-toggle {
+    position: fixed;
+    top: 6px;
+    right: 8px;
+    z-index: 10;
+    width: 32px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  #theme-toggle:hover { background: var(--chip); color: var(--fg); }
+  .theme-ico-sun, .theme-ico-moon { display: none; }
+  :root:not(.light) .theme-ico-sun { display: inline; }
+  :root.light .theme-ico-moon { display: inline; }
+  /* --- end light theme --- */
   html, body {
     margin: 0;
     padding: 0;
@@ -58,7 +117,7 @@
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.08),
       inset 0 -2px 6px rgba(0, 0, 0, 0.55),
-      0 0 0 1px var(--accent),
+      0 0 0 1px #4a9,
       0 0 18px rgba(74, 153, 153, 0.35),
       0 28px 70px rgba(0, 0, 0, 0.7);
   }
@@ -102,7 +161,7 @@
   .picks button {
     background: var(--panel);
     color: var(--fg);
-    border: 1px solid var(--rule);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 8px 14px;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
@@ -112,10 +171,10 @@
   }
   .picks button:hover {
     border-color: var(--accent);
-    background: #1a1a1a;
+    background: var(--chip);
   }
   .picks button:active {
-    background: #0e0e0e;
+    background: var(--border);
   }
 
   /* --- info section below canvas --- */
@@ -138,14 +197,14 @@
     margin: 0 0 14px;
     line-height: 1.5;
     font-size: 14px;
-    color: #ccc;
+    color: var(--text);
   }
   .info p strong { color: var(--fg); }
   .info code {
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
     font-size: 12.5px;
-    background: #000;
-    color: #d8c070;
+    background: var(--chip);
+    color: var(--addr);
     padding: 1px 5px;
     border-radius: 3px;
   }
@@ -157,7 +216,7 @@
   }
   .card {
     background: var(--panel);
-    border: 1px solid var(--rule);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 12px 14px;
   }
@@ -185,7 +244,7 @@
     margin: 0 0 6px;
     line-height: 1.45;
     font-size: 13.5px;
-    color: #ccc;
+    color: var(--text);
   }
   .card ul {
     margin: 0;
@@ -211,8 +270,8 @@
   table.memmap th, table.memmap td {
     text-align: left;
     padding: 3px 8px 3px 0;
-    border-bottom: 1px dotted #2a2a2a;
-    color: #ccc;
+    border-bottom: 1px dotted var(--rule);
+    color: var(--text);
     vertical-align: top;
   }
   table.memmap th {
@@ -222,24 +281,35 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
   }
-  table.memmap td.addr { color: #d8c070; white-space: nowrap; }
-  table.memmap tr.dim td { color: #666; }
+  table.memmap td.addr { color: var(--addr); white-space: nowrap; }
+  table.memmap tr.dim td { color: var(--faint); }
   .lede {
     font-size: 14px;
-    color: #c8c8c8;
+    color: var(--lead);
     line-height: 1.55;
     max-width: 880px;
   }
   .lede em { color: var(--accent); font-style: normal; }
   hr.sep {
     border: 0;
-    border-top: 1px solid var(--rule);
+    border-top: 1px solid var(--border);
     margin: 24px 0 16px;
   }
   a { color: var(--accent); }
 </style>
 </head>
 <body>
+<!-- Theme toggle (remove for dark-only) -->
+<button id="theme-toggle" type="button" aria-label="Toggle light/dark theme" title="Toggle light/dark theme">
+  <svg class="theme-ico-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+  <svg class="theme-ico-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+</button>
+<script>
+  document.getElementById('theme-toggle').addEventListener('click', function () {
+    var light = document.documentElement.classList.toggle('light');
+    try { localStorage.setItem('theme', light ? 'light' : 'dark'); } catch (e) {}
+  });
+</script>
 <div id="wrap">
   <div id="status">loading…</div>
   <div class="crt">
